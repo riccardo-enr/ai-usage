@@ -55,7 +55,39 @@ typedef struct {
     double used_pct;
     double elapsed_pct;
     bool has_elapsed;
+    bool is_token_window;
 } bar_data_t;
+
+typedef struct {
+    char label[64];
+    char provider[16];
+    char right_text[64];
+    int64_t total;
+    int64_t seg_a; /* cache_read */
+    int64_t seg_b; /* cache_write */
+    int64_t seg_c; /* input */
+    int64_t seg_d; /* output + reasoning */
+} hbar_item_t;
+
+typedef struct {
+    char title[64];
+    bool stacked_segments;
+    int n_items;
+    hbar_item_t items[12];
+} hbar_chart_t;
+
+typedef struct {
+    char day[16];
+    int64_t claude_tok;
+    int64_t codex_tok;
+    int64_t agy_tok;
+    int64_t turns;
+} daily_bar_t;
+
+typedef struct {
+    int n_days;
+    daily_bar_t days[31];
+} daily_chart_t;
 
 typedef struct {
     AdwApplicationWindow *win;
@@ -78,6 +110,28 @@ typedef struct {
     double elapsed_ms;
 } worker_ctx_t;
 
+static void provider_color(const char *prov, double *r, double *g, double *b) {
+    if (strcmp(prov, "claude") == 0) {
+        *r = 0.88; *g = 0.48; *b = 0.30; /* warm coral/orange */
+    } else if (strcmp(prov, "codex") == 0) {
+        *r = 0.26; *g = 0.62; *b = 0.92; /* sky blue */
+    } else {
+        *r = 0.28; *g = 0.76; *b = 0.54; /* emerald green */
+    }
+}
+
+static void rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r) {
+    if (w <= 0.0 || h <= 0.0) return;
+    if (r > w / 2.0) r = w / 2.0;
+    if (r > h / 2.0) r = h / 2.0;
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2.0, 0.0);
+    cairo_arc(cr, x + w - r, y + h - r, r, 0.0, M_PI / 2.0);
+    cairo_arc(cr, x + r, y + h - r, r, M_PI / 2.0, M_PI);
+    cairo_arc(cr, x + r, y + r, r, M_PI, 3.0 * M_PI / 2.0);
+    cairo_close_path(cr);
+}
+
 static void draw_quota_bar(
     GtkDrawingArea *area,
     cairo_t *cr,
@@ -89,10 +143,7 @@ static void draw_quota_bar(
     bar_data_t *bd = (bar_data_t *)user_data;
     double r = (double)height / 2.0;
 
-    cairo_new_sub_path(cr);
-    cairo_arc(cr, width - r, r, r, -M_PI / 2.0, M_PI / 2.0);
-    cairo_arc(cr, r, r, r, M_PI / 2.0, 3.0 * M_PI / 2.0);
-    cairo_close_path(cr);
+    rounded_rect(cr, 0, 0, width, height, r);
     cairo_set_source_rgba(cr, 0.50, 0.54, 0.60, 0.22);
     cairo_fill(cr);
 
@@ -102,14 +153,13 @@ static void draw_quota_bar(
     double fill_w = (clamped / 100.0) * (double)width;
     if (fill_w > 1.0) {
         cairo_save(cr);
-        cairo_new_sub_path(cr);
-        cairo_arc(cr, width - r, r, r, -M_PI / 2.0, M_PI / 2.0);
-        cairo_arc(cr, r, r, r, M_PI / 2.0, 3.0 * M_PI / 2.0);
-        cairo_close_path(cr);
+        rounded_rect(cr, 0, 0, width, height, r);
         cairo_clip(cr);
 
-        if (clamped >= 90.0 ||
-            (bd->has_elapsed && bd->elapsed_pct >= 5.0 && bd->used_pct > bd->elapsed_pct * 1.25)) {
+        if (bd->is_token_window) {
+            cairo_set_source_rgba(cr, 0.28, 0.74, 0.56, 0.90);
+        } else if (clamped >= 90.0 ||
+                   (bd->has_elapsed && bd->elapsed_pct >= 5.0 && bd->used_pct > bd->elapsed_pct * 1.25)) {
             cairo_set_source_rgba(cr, 0.90, 0.32, 0.28, 0.92);
         } else if (clamped >= 75.0 ||
                    (bd->has_elapsed && bd->elapsed_pct >= 5.0 && bd->used_pct > bd->elapsed_pct * 1.05)) {
@@ -117,7 +167,7 @@ static void draw_quota_bar(
         } else {
             cairo_set_source_rgba(cr, 0.24, 0.68, 0.44, 0.92);
         }
-        cairo_rectangle(cr, 0, 0, fill_w < 2.0 ? 2.0 : fill_w, height);
+        cairo_rectangle(cr, 0, 0, fill_w < 3.0 ? 3.0 : fill_w, height);
         cairo_fill(cr);
         cairo_restore(cr);
     }
@@ -134,7 +184,12 @@ static void draw_quota_bar(
     }
 }
 
-static GtkWidget *make_quota_drawing_area(double used_pct, bool has_elapsed, double elapsed_pct) {
+static GtkWidget *make_quota_drawing_area(
+    double used_pct,
+    bool has_elapsed,
+    double elapsed_pct,
+    bool is_token_window
+) {
     GtkWidget *area = gtk_drawing_area_new();
     gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), 16);
     gtk_widget_set_hexpand(area, TRUE);
@@ -142,8 +197,336 @@ static GtkWidget *make_quota_drawing_area(double used_pct, bool has_elapsed, dou
     bd->used_pct = used_pct;
     bd->has_elapsed = has_elapsed;
     bd->elapsed_pct = elapsed_pct;
+    bd->is_token_window = is_token_window;
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), draw_quota_bar, bd, g_free);
     return area;
+}
+
+static void draw_hbar_chart(
+    GtkDrawingArea *area,
+    cairo_t *cr,
+    int width,
+    int height,
+    gpointer user_data
+) {
+    (void)area;
+    hbar_chart_t *ch = (hbar_chart_t *)user_data;
+    cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+
+    if (ch->n_items == 0) {
+        cairo_set_font_size(cr, 12.0);
+        cairo_set_source_rgba(cr, 0.75, 0.78, 0.82, 0.7);
+        cairo_move_to(cr, 12, height / 2.0);
+        cairo_show_text(cr, "No usage data in selected window");
+        return;
+    }
+
+    int64_t max_val = 1;
+    for (int i = 0; i < ch->n_items; ++i) {
+        if (ch->items[i].total > max_val) max_val = ch->items[i].total;
+    }
+
+    double top_y = 6.0;
+    if (ch->stacked_segments) {
+        const char *leg_names[4] = {"Cache Read", "Cache Write", "Uncached In", "Out + Reas"};
+        const double leg_cols[4][3] = {
+            {0.22, 0.64, 0.88},
+            {0.62, 0.44, 0.88},
+            {0.92, 0.66, 0.24},
+            {0.30, 0.78, 0.52},
+        };
+        double lx = 4.0;
+        cairo_set_font_size(cr, 11.0);
+        for (int k = 0; k < 4; ++k) {
+            rounded_rect(cr, lx, 4.0, 10.0, 10.0, 3.0);
+            cairo_set_source_rgba(cr, leg_cols[k][0], leg_cols[k][1], leg_cols[k][2], 0.92);
+            cairo_fill(cr);
+            cairo_set_source_rgba(cr, 0.86, 0.88, 0.92, 0.85);
+            cairo_move_to(cr, lx + 14.0, 13.0);
+            cairo_show_text(cr, leg_names[k]);
+            lx += 118.0;
+        }
+        top_y = 26.0;
+    } else {
+        const char *p_names[3] = {"claude", "codex", "antigravity"};
+        double lx = 4.0;
+        cairo_set_font_size(cr, 11.0);
+        for (int k = 0; k < 3; ++k) {
+            double r, g, b;
+            provider_color(p_names[k], &r, &g, &b);
+            rounded_rect(cr, lx, 4.0, 10.0, 10.0, 3.0);
+            cairo_set_source_rgba(cr, r, g, b, 0.92);
+            cairo_fill(cr);
+            cairo_set_source_rgba(cr, 0.86, 0.88, 0.92, 0.85);
+            cairo_move_to(cr, lx + 14.0, 13.0);
+            cairo_show_text(cr, p_names[k]);
+            lx += 105.0;
+        }
+        top_y = 26.0;
+    }
+
+    double row_h = 26.0;
+    double label_w = 210.0;
+    double right_w = 155.0;
+    if (width < 600) {
+        label_w = 140.0;
+        right_w = 120.0;
+    }
+    double bar_x = label_w + 8.0;
+    double bar_max_w = (double)width - bar_x - right_w - 8.0;
+    if (bar_max_w < 60.0) bar_max_w = 60.0;
+
+    for (int i = 0; i < ch->n_items; ++i) {
+        hbar_item_t *it = &ch->items[i];
+        double y = top_y + (double)i * row_h;
+        double bar_h = 15.0;
+        double by = y + (row_h - bar_h) / 2.0;
+
+        cairo_set_font_size(cr, 11.5);
+        cairo_set_source_rgba(cr, 0.90, 0.92, 0.95, 0.92);
+        cairo_move_to(cr, 4.0, by + 11.5);
+        cairo_show_text(cr, it->label);
+
+        rounded_rect(cr, bar_x, by, bar_max_w, bar_h, 5.0);
+        cairo_set_source_rgba(cr, 0.50, 0.54, 0.60, 0.16);
+        cairo_fill(cr);
+
+        double tot_w = ((double)it->total / (double)max_val) * bar_max_w;
+        if (tot_w > 0.5 && it->total > 0) {
+            if (tot_w < 3.0) tot_w = 3.0;
+            cairo_save(cr);
+            rounded_rect(cr, bar_x, by, tot_w, bar_h, 5.0);
+            cairo_clip(cr);
+
+            if (ch->stacked_segments) {
+                const int64_t segs[4] = {it->seg_a, it->seg_b, it->seg_c, it->seg_d};
+                const double cols[4][3] = {
+                    {0.22, 0.64, 0.88},
+                    {0.62, 0.44, 0.88},
+                    {0.92, 0.66, 0.24},
+                    {0.30, 0.78, 0.52},
+                };
+                double cur_x = bar_x;
+                for (int s = 0; s < 4; ++s) {
+                    if (segs[s] <= 0) continue;
+                    double sw = ((double)segs[s] / (double)it->total) * tot_w;
+                    cairo_set_source_rgba(cr, cols[s][0], cols[s][1], cols[s][2], 0.92);
+                    cairo_rectangle(cr, cur_x, by, sw + 0.5, bar_h);
+                    cairo_fill(cr);
+                    cur_x += sw;
+                }
+            } else {
+                double r, g, b;
+                provider_color(it->provider, &r, &g, &b);
+                cairo_set_source_rgba(cr, r, g, b, 0.90);
+                cairo_rectangle(cr, bar_x, by, tot_w, bar_h);
+                cairo_fill(cr);
+            }
+            cairo_restore(cr);
+        }
+
+        cairo_text_extents_t ext;
+        cairo_text_extents(cr, it->right_text, &ext);
+        cairo_set_source_rgba(cr, 0.84, 0.87, 0.92, 0.88);
+        cairo_move_to(cr, (double)width - ext.width - 6.0, by + 11.5);
+        cairo_show_text(cr, it->right_text);
+    }
+}
+
+static GtkWidget *make_hbar_chart_card(const char *subtitle, hbar_chart_t *ch) {
+    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_add_css_class(card, "card-box");
+
+    GtkWidget *lbl = gtk_label_new(subtitle);
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+    gtk_widget_add_css_class(lbl, "metric-title");
+    gtk_box_append(GTK_BOX(card), lbl);
+
+    GtkWidget *area = gtk_drawing_area_new();
+    int h = 34 + (ch->n_items > 0 ? ch->n_items * 26 : 30);
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), h);
+    gtk_widget_set_hexpand(area, TRUE);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), draw_hbar_chart, ch, g_free);
+    gtk_box_append(GTK_BOX(card), area);
+    return card;
+}
+
+static void draw_daily_chart(
+    GtkDrawingArea *area,
+    cairo_t *cr,
+    int width,
+    int height,
+    gpointer user_data
+) {
+    (void)area;
+    daily_chart_t *dc = (daily_chart_t *)user_data;
+    cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+
+    if (dc->n_days == 0) {
+        cairo_set_font_size(cr, 12.0);
+        cairo_set_source_rgba(cr, 0.75, 0.78, 0.82, 0.7);
+        cairo_move_to(cr, 12, height / 2.0);
+        cairo_show_text(cr, "No daily usage data in selected window");
+        return;
+    }
+
+    const char *p_names[3] = {"claude", "codex", "antigravity"};
+    double lx = 4.0;
+    cairo_set_font_size(cr, 11.0);
+    for (int k = 0; k < 3; ++k) {
+        double r, g, b;
+        provider_color(p_names[k], &r, &g, &b);
+        rounded_rect(cr, lx, 4.0, 10.0, 10.0, 3.0);
+        cairo_set_source_rgba(cr, r, g, b, 0.92);
+        cairo_fill(cr);
+        cairo_set_source_rgba(cr, 0.86, 0.88, 0.92, 0.85);
+        cairo_move_to(cr, lx + 14.0, 13.0);
+        cairo_show_text(cr, p_names[k]);
+        lx += 105.0;
+    }
+
+    int64_t max_day = 1;
+    for (int i = 0; i < dc->n_days; ++i) {
+        int64_t t = dc->days[i].claude_tok + dc->days[i].codex_tok + dc->days[i].agy_tok;
+        if (t > max_day) max_day = t;
+    }
+
+    double pad_l = 58.0;
+    double pad_r = 12.0;
+    double pad_t = 30.0;
+    double pad_b = 28.0;
+    double plot_w = (double)width - pad_l - pad_r;
+    double plot_h = (double)height - pad_t - pad_b;
+    if (plot_w < 60.0 || plot_h < 40.0) return;
+
+    for (int g = 0; g <= 4; ++g) {
+        double frac = (double)g / 4.0;
+        double gy = pad_t + plot_h * (1.0 - frac);
+        cairo_set_source_rgba(cr, 0.55, 0.58, 0.64, 0.22);
+        cairo_set_line_width(cr, 1.0);
+        cairo_move_to(cr, pad_l, gy);
+        cairo_line_to(cr, pad_l + plot_w, gy);
+        cairo_stroke(cr);
+
+        int64_t gv = (int64_t)llround((double)max_day * frac);
+        char gs[24];
+        ai_fmt_tokens(gv, gs, sizeof(gs));
+        cairo_text_extents_t ext;
+        cairo_set_font_size(cr, 10.5);
+        cairo_text_extents(cr, gs, &ext);
+        cairo_set_source_rgba(cr, 0.78, 0.82, 0.88, 0.75);
+        cairo_move_to(cr, pad_l - ext.width - 8.0, gy + 4.0);
+        cairo_show_text(cr, gs);
+    }
+
+    double slot_w = plot_w / (double)dc->n_days;
+    double bar_w = slot_w * 0.62;
+    if (bar_w > 48.0) bar_w = 48.0;
+    if (bar_w < 6.0) bar_w = 6.0;
+
+    for (int i = 0; i < dc->n_days; ++i) {
+        daily_bar_t *d = &dc->days[i];
+        int64_t tot = d->claude_tok + d->codex_tok + d->agy_tok;
+        double cx = pad_l + ((double)i + 0.5) * slot_w;
+        double bx = cx - bar_w / 2.0;
+        double tot_h = ((double)tot / (double)max_day) * plot_h;
+
+        if (tot > 0 && tot_h > 1.0) {
+            if (tot_h < 3.0) tot_h = 3.0;
+            double by_top = pad_t + plot_h - tot_h;
+            cairo_save(cr);
+            rounded_rect(cr, bx, by_top, bar_w, tot_h, 4.0);
+            cairo_clip(cr);
+
+            const int64_t vals[3] = {d->claude_tok, d->codex_tok, d->agy_tok};
+            double cur_bottom = pad_t + plot_h;
+            for (int p = 0; p < 3; ++p) {
+                if (vals[p] <= 0) continue;
+                double sh = ((double)vals[p] / (double)tot) * tot_h;
+                double r, g, b;
+                provider_color(p_names[p], &r, &g, &b);
+                cairo_set_source_rgba(cr, r, g, b, 0.92);
+                cairo_rectangle(cr, bx, cur_bottom - sh - 0.5, bar_w, sh + 0.5);
+                cairo_fill(cr);
+                cur_bottom -= sh;
+            }
+            cairo_restore(cr);
+
+            if (dc->n_days <= 14) {
+                char ts[24];
+                ai_fmt_tokens(tot, ts, sizeof(ts));
+                cairo_text_extents_t ext;
+                cairo_set_font_size(cr, 10.0);
+                cairo_text_extents(cr, ts, &ext);
+                cairo_set_source_rgba(cr, 0.88, 0.90, 0.94, 0.88);
+                cairo_move_to(cr, cx - ext.width / 2.0, by_top - 5.0);
+                cairo_show_text(cr, ts);
+            }
+        }
+
+        int stride = dc->n_days > 16 ? 2 : 1;
+        if (i % stride == 0 || i == dc->n_days - 1) {
+            const char *short_d = strlen(d->day) >= 10 ? (d->day + 5) : d->day;
+            cairo_text_extents_t ext;
+            cairo_set_font_size(cr, 10.5);
+            cairo_text_extents(cr, short_d, &ext);
+            cairo_set_source_rgba(cr, 0.80, 0.84, 0.88, 0.85);
+            cairo_move_to(cr, cx - ext.width / 2.0, pad_t + plot_h + 16.0);
+            cairo_show_text(cr, short_d);
+        }
+    }
+}
+
+static int cmp_daily_bar_asc(const void *a, const void *b) {
+    const daily_bar_t *da = (const daily_bar_t *)a;
+    const daily_bar_t *db = (const daily_bar_t *)b;
+    return strcmp(da->day, db->day);
+}
+
+static GtkWidget *make_daily_chart_card(const ai_usage_report_t *rep, int height) {
+    daily_chart_t *dc = g_new0(daily_chart_t, 1);
+
+    for (int i = 0; i < rep->n_providers; ++i) {
+        const ai_provider_usage_t *pu = &rep->providers[i];
+        for (int d = 0; d < pu->n_days; ++d) {
+            const char *day_key = pu->by_day[d].key;
+            int64_t tok = ai_token_stats_total(&pu->by_day[d].stats);
+            int idx = -1;
+            for (int k = 0; k < dc->n_days; ++k) {
+                if (strcmp(dc->days[k].day, day_key) == 0) {
+                    idx = k;
+                    break;
+                }
+            }
+            if (idx < 0) {
+                if (dc->n_days >= 31) continue;
+                idx = dc->n_days++;
+                snprintf(dc->days[idx].day, sizeof(dc->days[idx].day), "%.15s", day_key);
+            }
+            if (strcmp(pu->provider, "claude") == 0) dc->days[idx].claude_tok += tok;
+            else if (strcmp(pu->provider, "codex") == 0) dc->days[idx].codex_tok += tok;
+            else dc->days[idx].agy_tok += tok;
+            dc->days[idx].turns += pu->by_day[d].stats.turns;
+        }
+    }
+    if (dc->n_days > 1) {
+        qsort(dc->days, (size_t)dc->n_days, sizeof(daily_bar_t), cmp_daily_bar_asc);
+    }
+
+    GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_add_css_class(card, "card-box");
+
+    GtkWidget *lbl = gtk_label_new("DAILY TOKEN BURN BY PROVIDER (STACKED)");
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+    gtk_widget_add_css_class(lbl, "metric-title");
+    gtk_box_append(GTK_BOX(card), lbl);
+
+    GtkWidget *area = gtk_drawing_area_new();
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), height);
+    gtk_widget_set_hexpand(area, TRUE);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), draw_daily_chart, dc, g_free);
+    gtk_box_append(GTK_BOX(card), area);
+    return card;
 }
 
 static void clear_box(GtkWidget *box) {
@@ -236,40 +619,47 @@ static void populate_overview(app_ui_t *ui, const ai_usage_report_t *rep) {
         gtk_box_append(GTK_BOX(top_row), src_lbl);
         gtk_box_append(GTK_BOX(card), top_row);
 
-        if (pu->n_quotas == 0) {
-            GtkWidget *empty_lbl = gtk_label_new("No live quota window reported (transcript token counts below)");
-            gtk_label_set_xalign(GTK_LABEL(empty_lbl), 0.0f);
-            gtk_widget_add_css_class(empty_lbl, "metric-sub");
-            gtk_box_append(GTK_BOX(card), empty_lbl);
-        } else {
-            for (int q = 0; q < pu->n_quotas; ++q) {
-                const ai_quota_window_t *qw = &pu->quotas[q];
-                double el = 0.0, proj = 0.0;
-                bool has_el = ai_quota_elapsed_pct(qw, now, &el);
-                bool has_proj = ai_quota_projected_pct(qw, now, &proj);
+        for (int q = 0; q < pu->n_quotas; ++q) {
+            const ai_quota_window_t *qw = &pu->quotas[q];
+            double el = 0.0, proj = 0.0;
+            bool has_el = ai_quota_elapsed_pct(qw, now, &el);
+            bool has_proj = ai_quota_projected_pct(qw, now, &proj);
 
-                char rem_s[32] = "-";
-                if (qw->has_reset) {
-                    ai_fmt_duration(qw->reset_epoch - now, rem_s, sizeof(rem_s));
-                }
-                char el_s[32], proj_s[32];
-                if (has_el) snprintf(el_s, sizeof(el_s), "%.0f%% elapsed", el);
-                else snprintf(el_s, sizeof(el_s), "elapsed n/a");
-                if (has_proj) snprintf(proj_s, sizeof(proj_s), "proj ~%.0f%%", proj);
-                else snprintf(proj_s, sizeof(proj_s), "proj n/a");
+            char rem_s[32] = "-";
+            if (qw->has_reset) {
+                ai_fmt_duration(qw->reset_epoch - now, rem_s, sizeof(rem_s));
+            }
+            char el_s[32], proj_s[32];
+            if (has_el) snprintf(el_s, sizeof(el_s), "%.0f%% elapsed", el);
+            else snprintf(el_s, sizeof(el_s), "elapsed n/a");
+            if (has_proj) snprintf(proj_s, sizeof(proj_s), "proj ~%.0f%%", proj);
+            else snprintf(proj_s, sizeof(proj_s), "proj n/a");
 
-                GtkWidget *w_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-                char w_lbl_txt[16];
-                snprintf(w_lbl_txt, sizeof(w_lbl_txt), "%3s", qw->label);
-                GtkWidget *w_lbl = gtk_label_new(w_lbl_txt);
-                gtk_widget_add_css_class(w_lbl, "mono-cell");
-                gtk_widget_set_size_request(w_lbl, 36, -1);
-                gtk_box_append(GTK_BOX(w_row), w_lbl);
+            GtkWidget *w_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+            char w_lbl_txt[16];
+            snprintf(w_lbl_txt, sizeof(w_lbl_txt), "%3s", qw->label);
+            GtkWidget *w_lbl = gtk_label_new(w_lbl_txt);
+            gtk_widget_add_css_class(w_lbl, "mono-cell");
+            gtk_widget_set_size_request(w_lbl, 36, -1);
+            gtk_box_append(GTK_BOX(w_row), w_lbl);
 
-                GtkWidget *bar = make_quota_drawing_area(qw->used_pct, has_el, el);
-                gtk_box_append(GTK_BOX(w_row), bar);
+            GtkWidget *bar = make_quota_drawing_area(qw->used_pct, has_el, el, qw->is_token_window);
+            gtk_box_append(GTK_BOX(w_row), bar);
 
-                char meta_txt[160];
+            char meta_txt[160];
+            if (qw->is_token_window) {
+                char t_s[24];
+                ai_fmt_tokens(qw->window_tokens, t_s, sizeof(t_s));
+                snprintf(
+                    meta_txt,
+                    sizeof(meta_txt),
+                    "%6s (%3lldt)  |  ages out %7s  |  %11s  |    no %% cap",
+                    t_s,
+                    (long long)qw->window_turns,
+                    rem_s,
+                    el_s
+                );
+            } else {
                 snprintf(
                     meta_txt,
                     sizeof(meta_txt),
@@ -279,13 +669,13 @@ static void populate_overview(app_ui_t *ui, const ai_usage_report_t *rep) {
                     el_s,
                     proj_s
                 );
-                GtkWidget *meta_lbl = gtk_label_new(meta_txt);
-                gtk_label_set_xalign(GTK_LABEL(meta_lbl), 1.0f);
-                gtk_widget_add_css_class(meta_lbl, "metric-sub");
-                gtk_box_append(GTK_BOX(w_row), meta_lbl);
-
-                gtk_box_append(GTK_BOX(card), w_row);
             }
+            GtkWidget *meta_lbl = gtk_label_new(meta_txt);
+            gtk_label_set_xalign(GTK_LABEL(meta_lbl), 1.0f);
+            gtk_widget_add_css_class(meta_lbl, "metric-sub");
+            gtk_box_append(GTK_BOX(w_row), meta_lbl);
+
+            gtk_box_append(GTK_BOX(card), w_row);
         }
         gtk_box_append(GTK_BOX(q_list), card);
     }
@@ -316,8 +706,9 @@ static void populate_overview(app_ui_t *ui, const ai_usage_report_t *rep) {
     gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(flow), 10);
     gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(flow), 10);
 
+    int64_t grand_tot = ai_token_stats_total(&grand);
     char v0[32], v1[32], v2[32], v3[32], cw_s[32], out_s[32], reas_s[32];
-    ai_fmt_tokens(ai_token_stats_total(&grand), v0, sizeof(v0));
+    ai_fmt_tokens(grand_tot, v0, sizeof(v0));
     ai_fmt_tokens(grand.input_tokens, v1, sizeof(v1));
     ai_fmt_tokens(grand.cache_read_tokens, v2, sizeof(v2));
     ai_fmt_tokens(grand.output_tokens + grand.reasoning_tokens, v3, sizeof(v3));
@@ -355,6 +746,32 @@ static void populate_overview(app_ui_t *ui, const ai_usage_report_t *rep) {
     }
     gtk_box_append(GTK_BOX(ui->overview_box), flow);
 
+    /* Provider stacked token composition chart + daily timeline chart */
+    hbar_chart_t *prov_ch = g_new0(hbar_chart_t, 1);
+    prov_ch->stacked_segments = true;
+    for (int i = 0; i < rep->n_providers; ++i) {
+        const ai_provider_usage_t *pu = &rep->providers[i];
+        const ai_token_stats_t *t = &pu->totals;
+        int64_t ptot = ai_token_stats_total(t);
+        hbar_item_t *it = &prov_ch->items[prov_ch->n_items++];
+        snprintf(it->label, sizeof(it->label), "%s (%d sess)", pu->provider, pu->sessions_count);
+        snprintf(it->provider, sizeof(it->provider), "%s", pu->provider);
+        it->total = ptot;
+        it->seg_a = t->cache_read_tokens;
+        it->seg_b = t->cache_write_tokens;
+        it->seg_c = t->input_tokens;
+        it->seg_d = t->output_tokens + t->reasoning_tokens;
+        char ts[24];
+        ai_fmt_tokens(ptot, ts, sizeof(ts));
+        double sh = grand_tot > 0 ? (100.0 * (double)ptot / (double)grand_tot) : 0.0;
+        snprintf(it->right_text, sizeof(it->right_text), "%7s (%5.1f%%)", ts, sh);
+    }
+    gtk_box_append(
+        GTK_BOX(ui->overview_box),
+        make_hbar_chart_card("PROVIDER VOLUME & TOKEN COMPOSITION", prov_ch)
+    );
+    gtk_box_append(GTK_BOX(ui->overview_box), make_daily_chart_card(rep, 175));
+
     const char *headers[9] = {
         "Provider", "Sess", "Turns", "Input", "CacheRead", "CacheWrite", "Output", "Reas", "Total"
     };
@@ -387,7 +804,7 @@ static void populate_overview(app_ui_t *ui, const ai_usage_report_t *rep) {
         ai_fmt_tokens(grand.cache_write_tokens, buf[n_rows][5], 32);
         ai_fmt_tokens(grand.output_tokens, buf[n_rows][6], 32);
         ai_fmt_tokens(grand.reasoning_tokens, buf[n_rows][7], 32);
-        ai_fmt_tokens(ai_token_stats_total(&grand), buf[n_rows][8], 32);
+        ai_fmt_tokens(grand_tot, buf[n_rows][8], 32);
         for (int c = 0; c < 9; ++c) cells[n_rows][c] = buf[n_rows][c];
         ++n_rows;
     }
@@ -398,6 +815,14 @@ static void populate_overview(app_ui_t *ui, const ai_usage_report_t *rep) {
     );
 }
 
+static int cmp_hbar_item_desc(const void *a, const void *b) {
+    const hbar_item_t *ia = (const hbar_item_t *)a;
+    const hbar_item_t *ib = (const hbar_item_t *)b;
+    if (ia->total > ib->total) return -1;
+    if (ia->total < ib->total) return 1;
+    return 0;
+}
+
 static void populate_models(app_ui_t *ui, const ai_usage_report_t *rep) {
     clear_box(ui->models_box);
     GtkWidget *hdr = gtk_label_new("Usage by Model");
@@ -405,6 +830,13 @@ static void populate_models(app_ui_t *ui, const ai_usage_report_t *rep) {
     gtk_widget_add_css_class(hdr, "section-header");
     gtk_box_append(GTK_BOX(ui->models_box), hdr);
 
+    int64_t grand_tot = 0;
+    for (int i = 0; i < rep->n_providers; ++i) {
+        grand_tot += ai_token_stats_total(&rep->providers[i].totals);
+    }
+
+    hbar_item_t all_m[64];
+    int n_all_m = 0;
     const char *headers[7] = {"Provider", "Model", "Turns", "Input", "CacheRead", "Out+Reas", "Total"};
     const bool ralign[7] = {false, false, true, true, true, true, true};
     char buf[64][7][64];
@@ -415,17 +847,37 @@ static void populate_models(app_ui_t *ui, const ai_usage_report_t *rep) {
         const ai_provider_usage_t *pu = &rep->providers[i];
         for (int m = 0; m < pu->n_models && n_rows < 64; ++m) {
             const ai_token_stats_t *st = &pu->by_model[m].stats;
+            int64_t mtot = ai_token_stats_total(st);
+            if (n_all_m < 64) {
+                hbar_item_t *it = &all_m[n_all_m++];
+                memset(it, 0, sizeof(*it));
+                snprintf(it->label, sizeof(it->label), "%.26s", pu->by_model[m].key);
+                snprintf(it->provider, sizeof(it->provider), "%s", pu->provider);
+                it->total = mtot;
+                char ts[24];
+                ai_fmt_tokens(mtot, ts, sizeof(ts));
+                double sh = grand_tot > 0 ? (100.0 * (double)mtot / (double)grand_tot) : 0.0;
+                snprintf(it->right_text, sizeof(it->right_text), "%7s (%5.1f%%)", ts, sh);
+            }
             snprintf(buf[n_rows][0], 64, "%s", pu->provider);
             snprintf(buf[n_rows][1], 64, "%.63s", pu->by_model[m].key);
             snprintf(buf[n_rows][2], 64, "%lld", (long long)st->turns);
             ai_fmt_tokens(st->input_tokens, buf[n_rows][3], 64);
             ai_fmt_tokens(st->cache_read_tokens, buf[n_rows][4], 64);
             ai_fmt_tokens(st->output_tokens + st->reasoning_tokens, buf[n_rows][5], 64);
-            ai_fmt_tokens(ai_token_stats_total(st), buf[n_rows][6], 64);
+            ai_fmt_tokens(mtot, buf[n_rows][6], 64);
             for (int c = 0; c < 7; ++c) cells[n_rows][c] = buf[n_rows][c];
             ++n_rows;
         }
     }
+
+    if (n_all_m > 1) qsort(all_m, (size_t)n_all_m, sizeof(hbar_item_t), cmp_hbar_item_desc);
+    hbar_chart_t *mch = g_new0(hbar_chart_t, 1);
+    mch->stacked_segments = false;
+    mch->n_items = n_all_m < 10 ? n_all_m : 10;
+    for (int k = 0; k < mch->n_items; ++k) mch->items[k] = all_m[k];
+    gtk_box_append(GTK_BOX(ui->models_box), make_hbar_chart_card("TOP MODELS BY TOKEN VOLUME", mch));
+
     if (n_rows == 0) {
         const char *empty[7] = {"-", "No model usage in window", "0", "0", "0", "0", "0"};
         for (int c = 0; c < 7; ++c) {
@@ -457,6 +909,8 @@ static void populate_daily(app_ui_t *ui, const ai_usage_report_t *rep) {
     gtk_label_set_xalign(GTK_LABEL(hdr), 0.0f);
     gtk_widget_add_css_class(hdr, "section-header");
     gtk_box_append(GTK_BOX(ui->daily_box), hdr);
+
+    gtk_box_append(GTK_BOX(ui->daily_box), make_daily_chart_card(rep, 230));
 
     day_row_t drows[128];
     int n_drows = 0;
@@ -526,6 +980,32 @@ static void populate_sessions(app_ui_t *ui, const ai_usage_report_t *rep) {
     }
     if (n_ptrs > 1) qsort(ptrs, (size_t)n_ptrs, sizeof(ptrs[0]), cmp_session_ptr_desc);
 
+    hbar_item_t s_items[64];
+    int n_sitems = 0;
+    for (int i = 0; i < n_ptrs; ++i) {
+        const ai_session_info_t *s = ptrs[i];
+        hbar_item_t *it = &s_items[n_sitems++];
+        memset(it, 0, sizeof(*it));
+        const char *loc = s->title;
+        if (!loc || !*loc) {
+            const char *slash = strrchr(s->cwd, '/');
+            loc = (slash && *(slash + 1)) ? (slash + 1) : s->cwd;
+        }
+        if (!loc || !*loc) loc = s->session_id;
+        snprintf(it->label, sizeof(it->label), "%.25s", loc);
+        snprintf(it->provider, sizeof(it->provider), "%s", s->provider);
+        it->total = s->total_tokens;
+        char ts[24];
+        ai_fmt_tokens(s->total_tokens, ts, sizeof(ts));
+        snprintf(it->right_text, sizeof(it->right_text), "%7s (%3lldt)", ts, (long long)s->turns);
+    }
+    if (n_sitems > 1) qsort(s_items, (size_t)n_sitems, sizeof(hbar_item_t), cmp_hbar_item_desc);
+    hbar_chart_t *sch = g_new0(hbar_chart_t, 1);
+    sch->stacked_segments = false;
+    sch->n_items = n_sitems < 10 ? n_sitems : 10;
+    for (int k = 0; k < sch->n_items; ++k) sch->items[k] = s_items[k];
+    gtk_box_append(GTK_BOX(ui->sessions_box), make_hbar_chart_card("TOP SESSIONS BY TOKEN VOLUME", sch));
+
     const char *headers[6] = {"Updated", "Provider", "Model", "Turns", "Total", "Session / CWD"};
     const bool ralign[6] = {false, false, false, true, true, false};
     char buf[30][6][96];
@@ -572,7 +1052,7 @@ static gboolean apply_report_idle(gpointer data) {
     ui->loading = false;
     gtk_widget_set_sensitive(ui->refresh_btn, TRUE);
     char status_txt[64];
-    snprintf(status_txt, sizeof(status_txt), "C core (%.1f ms)", ctx->elapsed_ms);
+    snprintf(status_txt, sizeof(status_txt), "%.0f ms", ctx->elapsed_ms);
     gtk_label_set_text(GTK_LABEL(ui->status_label), status_txt);
 
     populate_overview(ui, &ctx->report);
@@ -598,7 +1078,7 @@ static void refresh_async(app_ui_t *ui) {
     if (ui->loading) return;
     ui->loading = true;
     gtk_widget_set_sensitive(ui->refresh_btn, FALSE);
-    gtk_label_set_text(GTK_LABEL(ui->status_label), "Refreshing...");
+    gtk_label_set_text(GTK_LABEL(ui->status_label), "...");
 
     worker_ctx_t *ctx = g_new0(worker_ctx_t, 1);
     ctx->ui = ui;
@@ -648,8 +1128,8 @@ static GtkWidget *make_scrolled_page(GtkWidget **out_inner) {
         GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC
     );
     GtkWidget *clamp = adw_clamp_new();
-    adw_clamp_set_maximum_size(ADW_CLAMP(clamp), 980);
-    adw_clamp_set_tightening_threshold(ADW_CLAMP(clamp), 720);
+    adw_clamp_set_maximum_size(ADW_CLAMP(clamp), 1040);
+    adw_clamp_set_tightening_threshold(ADW_CLAMP(clamp), 740);
 
     GtkWidget *inner = gtk_box_new(GTK_ORIENTATION_VERTICAL, 14);
     gtk_widget_set_margin_top(inner, 16);
@@ -681,7 +1161,7 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
 
     ui->win = ADW_APPLICATION_WINDOW(adw_application_window_new(GTK_APPLICATION(app)));
     gtk_window_set_title(GTK_WINDOW(ui->win), "AI Usage");
-    gtk_window_set_default_size(GTK_WINDOW(ui->win), 1040, 740);
+    gtk_window_set_default_size(GTK_WINDOW(ui->win), 1140, 820);
 
     GtkWidget *toolbar = adw_toolbar_view_new();
     adw_application_window_set_content(ui->win, toolbar);
@@ -716,7 +1196,7 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
     }
     adw_header_bar_pack_start(ADW_HEADER_BAR(header), days_box);
 
-    const char *prov_items[5] = {"All Providers", "Claude", "Codex", "Antigravity", NULL};
+    const char *prov_items[5] = {"All", "Claude", "Codex", "Antigravity", NULL};
     GtkWidget *dropdown = gtk_drop_down_new_from_strings(prov_items);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(dropdown), 0);
     g_signal_connect(dropdown, "notify::selected", G_CALLBACK(on_provider_changed), ui);
@@ -769,9 +1249,9 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
 }
 
 int main(int argc, char **argv) {
-    AdwApplication *app = adw_application_new("com.riccardo.AIUsage", G_APPLICATION_DEFAULT_FLAGS);
+    AdwApplication *app = adw_application_new("com.riccardo.AiUsage", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
-    int rc = g_application_run(G_APPLICATION(app), argc, argv);
+    int status = g_application_run(G_APPLICATION(app), argc, argv);
     g_object_unref(app);
-    return rc;
+    return status;
 }

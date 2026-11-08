@@ -33,6 +33,9 @@ typedef struct {
     bool has_reset;
     double updated_epoch;
     bool has_updated;
+    bool is_token_window;
+    int64_t window_tokens;
+    int64_t window_turns;
 } ai_quota_window_t;
 
 typedef struct {

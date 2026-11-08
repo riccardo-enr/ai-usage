@@ -481,43 +481,61 @@ static void claude_quota(ai_provider_usage_t *pu, const char *base_dir) {
             if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
                 const char *req = "{\"query\":\"snapshot\"}\n";
                 if (send(fd, req, strlen(req), 0) > 0) {
-                    char buf[8192];
-                    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
-                    if (n > 0) {
-                        buf[n] = '\0';
-                        char *nl = strchr(buf, '\n');
-                        if (nl) *nl = '\0';
-                        jspan_t root = {buf, buf + strlen(buf)};
-                        jspan_t usage;
-                        if (jobj_find(root, "usage", &usage)) {
-                            double upd = 0.0;
-                            bool has_upd = jobj_get_double(root, "updated_at", &upd);
-                            double pct5 = 0.0;
-                            if (jobj_get_double(usage, "five_hour_pct", &pct5)) {
-                                ai_quota_window_t *q = &pu->quotas[pu->n_quotas++];
-                                snprintf(q->label, sizeof(q->label), "5h");
-                                q->used_pct = pct5;
-                                q->window_seconds = 5 * 3600;
-                                q->has_reset = jobj_get_double(usage, "five_hour_reset", &q->reset_epoch);
-                                q->has_updated = has_upd;
-                                q->updated_epoch = upd;
-                            }
-                            double pct7 = 0.0;
-                            if (jobj_get_double(usage, "seven_day_pct", &pct7)) {
-                                ai_quota_window_t *q = &pu->quotas[pu->n_quotas++];
-                                snprintf(q->label, sizeof(q->label), "7d");
-                                q->used_pct = pct7;
-                                q->window_seconds = 7 * 86400;
-                                q->has_reset = jobj_get_double(usage, "seven_day_reset", &q->reset_epoch);
-                                q->has_updated = has_upd;
-                                q->updated_epoch = upd;
-                            }
-                            if (pu->n_quotas > 0) {
-                                snprintf(pu->quota_note, sizeof(pu->quota_note), "live daemon");
-                                close(fd);
-                                return;
+                    size_t cap = 65536;
+                    char *buf = malloc(cap);
+                    if (buf) {
+                        size_t used = 0;
+                        while (used + 1 < cap) {
+                            ssize_t n = recv(fd, buf + used, cap - 1 - used, 0);
+                            if (n <= 0) break;
+                            used += (size_t)n;
+                            buf[used] = '\0';
+                            if (memchr(buf + used - (size_t)n, '\n', (size_t)n)) break;
+                        }
+                        if (used > 0) {
+                            char *nl = strchr(buf, '\n');
+                            if (nl) *nl = '\0';
+                            jspan_t root = {buf, buf + strlen(buf)};
+                            jspan_t usage;
+                            if (jobj_find(root, "usage", &usage)) {
+                                double upd = 0.0;
+                                bool has_upd = jobj_get_double(root, "updated_at", &upd);
+                                double pct5 = 0.0;
+                                if (jobj_get_double(usage, "used_percentage", &pct5) ||
+                                    jobj_get_double(usage, "five_hour_pct", &pct5)) {
+                                    ai_quota_window_t *q = &pu->quotas[pu->n_quotas++];
+                                    snprintf(q->label, sizeof(q->label), "5h");
+                                    q->used_pct = pct5;
+                                    q->window_seconds = 5 * 3600;
+                                    q->has_reset = jobj_get_double(usage, "resets_at_epoch", &q->reset_epoch) ||
+                                                   jobj_get_double(usage, "five_hour_reset", &q->reset_epoch);
+                                    q->has_updated = has_upd;
+                                    q->updated_epoch = upd;
+                                }
+                                double pct7 = 0.0;
+                                if (jobj_get_double(usage, "seven_day_pct", &pct7)) {
+                                    ai_quota_window_t *q = &pu->quotas[pu->n_quotas++];
+                                    snprintf(q->label, sizeof(q->label), "7d");
+                                    q->used_pct = pct7;
+                                    q->window_seconds = 7 * 86400;
+                                    q->has_reset = jobj_get_double(usage, "seven_day_reset", &q->reset_epoch);
+                                    q->has_updated = has_upd;
+                                    q->updated_epoch = upd;
+                                }
+                                if (pu->n_quotas > 0) {
+                                    char mix[64] = "";
+                                    if (jobj_get_str(usage, "model_mix", mix, sizeof(mix)) && *mix) {
+                                        snprintf(pu->quota_note, sizeof(pu->quota_note), "live daemon (%.42s)", mix);
+                                    } else {
+                                        snprintf(pu->quota_note, sizeof(pu->quota_note), "live daemon");
+                                    }
+                                    free(buf);
+                                    close(fd);
+                                    return;
+                                }
                             }
                         }
+                        free(buf);
                     }
                 }
             }
@@ -1011,11 +1029,26 @@ typedef struct {
     char cwd[512];
 } agy_summary_t;
 
-static void collect_antigravity(ai_provider_usage_t *pu, const char *base_dir, double cutoff_epoch) {
+static void collect_antigravity(
+    ai_provider_usage_t *pu,
+    const char *base_dir,
+    double cutoff_epoch,
+    double now_epoch
+) {
     snprintf(pu->provider, sizeof(pu->provider), "antigravity");
     snprintf(pu->quota_note, sizeof(pu->quota_note), "local transcripts only");
     struct stat st;
     if (stat(base_dir, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+
+    int64_t tok_5h = 0, turns_5h = 0;
+    int64_t tok_7d = 0, turns_7d = 0;
+    double oldest_5h = 0.0, oldest_7d = 0.0;
+    double cut_5h = now_epoch - 5.0 * 3600.0;
+    double cut_7d = now_epoch - 7.0 * 86400.0;
+    double scan_cutoff = cutoff_epoch;
+    if (scan_cutoff > 0.0 && cut_7d < scan_cutoff) {
+        scan_cutoff = cut_7d;
+    }
 
     agy_summary_t *sums = NULL;
     int n_sums = 0, cap_sums = 0;
@@ -1077,7 +1110,7 @@ static void collect_antigravity(ai_provider_usage_t *pu, const char *base_dir, d
         for (size_t i = 0; i < g.gl_pathc; ++i) {
             const char *tpath = g.gl_pathv[i];
             if (stat(tpath, &st) != 0) continue;
-            if (cutoff_epoch > 0.0 && (double)st.st_mtime < cutoff_epoch) continue;
+            if (scan_cutoff > 0.0 && (double)st.st_mtime < scan_cutoff) continue;
 
             char cid[128] = "";
             const char *bpos = strstr(tpath, "/brain/");
@@ -1134,11 +1167,24 @@ static void collect_antigravity(ai_provider_usage_t *pu, const char *base_dir, d
                 if (jobj_get_str(root, "created_at", ts_str, sizeof(ts_str))) {
                     parse_iso_ts(ts_str, &ts);
                 }
-                if (cutoff_epoch > 0.0 && ts < cutoff_epoch) continue;
                 int64_t inp = jobj_get_i64(root, "input_tokens", 0);
                 int64_t cache_r = jobj_get_i64(root, "cache_read_tokens", 0);
                 int64_t out = jobj_get_i64(root, "output_tokens", 0);
                 if (inp == 0 && cache_r == 0 && out == 0) continue;
+
+                int64_t turn_tok = inp + cache_r + out;
+                if (ts >= cut_5h) {
+                    tok_5h += turn_tok;
+                    turns_5h += 1;
+                    if (oldest_5h == 0.0 || ts < oldest_5h) oldest_5h = ts;
+                }
+                if (ts >= cut_7d) {
+                    tok_7d += turn_tok;
+                    turns_7d += 1;
+                    if (oldest_7d == 0.0 || ts < oldest_7d) oldest_7d = ts;
+                }
+
+                if (cutoff_epoch > 0.0 && ts < cutoff_epoch) continue;
 
                 int64_t tok = record_turn(pu, ts, cur_model, inp, cache_r, 0, out, 0);
                 ai_session_info_t *s = session_get_or_add(pu, cid);
@@ -1167,6 +1213,45 @@ static void collect_antigravity(ai_provider_usage_t *pu, const char *base_dir, d
     }
     free(sums);
     pu->sessions_count = pu->n_sessions;
+
+    /* Populate 5h and 7d rolling token windows (scaled vs 50M / 250M reference). */
+    ai_quota_window_t *q5 = &pu->quotas[pu->n_quotas++];
+    memset(q5, 0, sizeof(*q5));
+    snprintf(q5->label, sizeof(q5->label), "5h");
+    q5->window_seconds = 5 * 3600;
+    q5->is_token_window = true;
+    q5->window_tokens = tok_5h;
+    q5->window_turns = turns_5h;
+    q5->used_pct = ((double)tok_5h / 50e6) * 100.0;
+    if (q5->used_pct > 100.0) q5->used_pct = 100.0;
+    if (oldest_5h > 0.0) {
+        q5->has_reset = true;
+        q5->reset_epoch = oldest_5h + 5.0 * 3600.0;
+    }
+    q5->has_updated = true;
+    q5->updated_epoch = now_epoch;
+
+    ai_quota_window_t *q7 = &pu->quotas[pu->n_quotas++];
+    memset(q7, 0, sizeof(*q7));
+    snprintf(q7->label, sizeof(q7->label), "7d");
+    q7->window_seconds = 7 * 86400;
+    q7->is_token_window = true;
+    q7->window_tokens = tok_7d;
+    q7->window_turns = turns_7d;
+    q7->used_pct = ((double)tok_7d / 250e6) * 100.0;
+    if (q7->used_pct > 100.0) q7->used_pct = 100.0;
+    if (oldest_7d > 0.0) {
+        q7->has_reset = true;
+        q7->reset_epoch = oldest_7d + 7.0 * 86400.0;
+    }
+    q7->has_updated = true;
+    q7->updated_epoch = now_epoch;
+
+    snprintf(
+        pu->quota_note,
+        sizeof(pu->quota_note),
+        "rolling tokens (no server %% cap exposed)"
+    );
 }
 
 static int cmp_session_desc(const void *a, const void *b) {
@@ -1233,7 +1318,8 @@ void ai_usage_collect(
         collect_antigravity(
             &out->providers[out->n_providers++],
             (gemini_dir && *gemini_dir) ? gemini_dir : def_gemini,
-            cutoff
+            cutoff,
+            cur_now
         );
     }
 
