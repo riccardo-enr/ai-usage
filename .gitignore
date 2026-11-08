@@ -1,0 +1,4 @@
+/build/
+/.pixi/
+/compile_commands.json
+/.claude/

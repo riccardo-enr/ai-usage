@@ -1,0 +1,18 @@
+[project]
+name = "ai-usage"
+version = "0.1.0"
+description = "Unified C + GTK4/Libadwaita usage tracker for Claude Code, Codex, and Antigravity"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tasks]
+configure = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ln -sf build/compile_commands.json compile_commands.json"
+build = { cmd = "cmake --build build", depends-on = ["configure"] }
+usage = { cmd = "./build/ai-usage", depends-on = ["build"] }
+today = { cmd = "./build/ai-usage --days 1", depends-on = ["build"] }
+models = { cmd = "./build/ai-usage --models", depends-on = ["build"] }
+sessions = { cmd = "./build/ai-usage --sessions", depends-on = ["build"] }
+daily = { cmd = "./build/ai-usage --daily", depends-on = ["build"] }
+json = { cmd = "./build/ai-usage --json", depends-on = ["build"] }
+gui = { cmd = "./build/ai-usage-gtk", depends-on = ["build"] }
+test = { cmd = "ctest --test-dir build --output-on-failure", depends-on = ["build"] }
