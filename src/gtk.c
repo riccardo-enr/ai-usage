@@ -597,7 +597,6 @@ static GtkWidget *make_quota_row(const ai_quota_window_t *qw, double now, bool r
     gtk_box_append(GTK_BOX(w_row), bar);
 
     char meta_txt[160];
-    double left = 100.0 - CLAMP(qw->used_pct, 0.0, 100.0);
     const char *reading = qw->from_history ? " (last recorded)" : "";
     if (rolling) {
         char tokens[24];
@@ -605,16 +604,16 @@ static GtkWidget *make_quota_row(const ai_quota_window_t *qw, double now, bool r
         snprintf(meta_txt, sizeof(meta_txt), "%s tokens (%lld turns) | %.1f%% of reference",
                  tokens, (long long)qw->window_turns, qw->used_pct);
     } else if (expired) {
-        snprintf(meta_txt, sizeof(meta_txt), "Awaiting update | Last reading %.1f%% left", left);
+        snprintf(meta_txt, sizeof(meta_txt), "Awaiting update | Last reading %.1f%% used", qw->used_pct);
     } else if (qw->has_reset) {
         char remaining[32];
         ai_fmt_duration(qw->reset_epoch - now, remaining, sizeof(remaining));
         g_autoptr(GDateTime) reset = g_date_time_new_from_unix_local((gint64)qw->reset_epoch);
         g_autofree char *reset_time = reset ? g_date_time_format(reset, "%a %d %b, %H:%M") : NULL;
-        snprintf(meta_txt, sizeof(meta_txt), "%.1f%% left%s | Resets %s (in %s)",
-                 left, reading, reset_time ? reset_time : "soon", remaining);
+        snprintf(meta_txt, sizeof(meta_txt), "%.1f%% used%s | Resets %s (in %s)",
+                 qw->used_pct, reading, reset_time ? reset_time : "soon", remaining);
     } else {
-        snprintf(meta_txt, sizeof(meta_txt), "%.1f%% left%s | Reset unknown", left, reading);
+        snprintf(meta_txt, sizeof(meta_txt), "%.1f%% used%s | Reset unknown", qw->used_pct, reading);
     }
     GtkWidget *meta_lbl = gtk_label_new(meta_txt);
     gtk_label_set_xalign(GTK_LABEL(meta_lbl), 1.0f);
@@ -668,7 +667,7 @@ static void populate_overview(app_ui_t *ui, const worker_ctx_t *ctx) {
     clear_box(ui->overview_box);
     double now = (double)g_get_real_time() / G_USEC_PER_SEC;
 
-    GtkWidget *q_hdr = gtk_label_new("Quota Remaining");
+    GtkWidget *q_hdr = gtk_label_new("Quota and Reset Times");
     gtk_label_set_xalign(GTK_LABEL(q_hdr), 0.0f);
     gtk_widget_add_css_class(q_hdr, "section-header");
     gtk_box_append(GTK_BOX(ui->overview_box), q_hdr);
