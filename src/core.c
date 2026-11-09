@@ -307,6 +307,77 @@ static bool parse_iso_ts(const char *s, double *out) {
     return true;
 }
 
+static bool jarray_next(jspan_t array, const char **cursor, jspan_t *value) {
+    const char *p = skip_ws(*cursor ? *cursor : array.p, array.end);
+    char separator = *cursor ? ',' : '[';
+    if (p >= array.end || *p != separator) return false;
+    p = skip_ws(p + 1, array.end);
+    if (p >= array.end || *p == ']') return false;
+    const char *end = skip_value(p, array.end);
+    if (end <= p || end >= array.end) return false;
+    *value = (jspan_t){p, end};
+    *cursor = end;
+    return true;
+}
+
+size_t ai_antigravity_parse_quotas(const char *json, ai_grouped_quota_t **out) {
+    *out = NULL;
+    jspan_t root = {json, json + strlen(json)};
+    jspan_t command, data, groups;
+    if (!jobj_find(root, "command", &command) || !jobj_find(command, "data", &data) ||
+        !jobj_find(data, "groups", &groups)) return 0;
+
+    size_t count = 0;
+    const char *group_cursor = NULL;
+    jspan_t group;
+    while (jarray_next(groups, &group_cursor, &group)) {
+        ai_grouped_quota_t row = {0};
+        jspan_t buckets;
+        if (!jobj_get_str(group, "name", row.group, sizeof(row.group)) ||
+            !jobj_find(group, "buckets", &buckets)) continue;
+
+        size_t group_start = count;
+        const char *bucket_cursor = NULL;
+        jspan_t bucket;
+        while (jarray_next(buckets, &bucket_cursor, &bucket)) {
+            char window[16], reset[64];
+            double remaining;
+            if (!jobj_get_str(bucket, "window", window, sizeof(window)) ||
+                !jobj_get_double(bucket, "remaining_fraction", &remaining) ||
+                !isfinite(remaining) || remaining < 0.0 || remaining > 1.0) continue;
+
+            ai_quota_window_t *qw = &row.window;
+            if (strcmp(window, "5h") == 0) {
+                snprintf(qw->label, sizeof(qw->label), "5h");
+                qw->window_seconds = 5 * 3600;
+            } else if (strcmp(window, "weekly") == 0) {
+                snprintf(qw->label, sizeof(qw->label), "7d");
+                qw->window_seconds = 7 * 86400;
+            } else {
+                continue;
+            }
+            qw->used_pct = (1.0 - remaining) * 100.0;
+            qw->has_reset = jobj_get_str(bucket, "reset_time", reset, sizeof(reset)) &&
+                            parse_iso_ts(reset, &qw->reset_epoch);
+            ai_grouped_quota_t *rows = realloc(*out, (count + 1) * sizeof(*rows));
+            if (!rows) {
+                free(*out);
+                *out = NULL;
+                return 0;
+            }
+            *out = rows;
+            size_t pos = count;
+            while (pos > group_start && rows[pos - 1].window.window_seconds > qw->window_seconds) {
+                rows[pos] = rows[pos - 1];
+                --pos;
+            }
+            rows[pos] = row;
+            ++count;
+        }
+    }
+    return count;
+}
+
 static void epoch_to_day(double ts, char out[16]) {
     time_t sec = (time_t)ts;
     struct tm tm_val;
@@ -344,8 +415,17 @@ bool ai_quota_elapsed_pct(const ai_quota_window_t *qw, double now, double *out_p
 
 bool ai_quota_projected_pct(const ai_quota_window_t *qw, double now, double *out_pct) {
     double el = 0.0;
-    if (!ai_quota_elapsed_pct(qw, now, &el) || el < 5.0) return false;
+    if (!ai_quota_elapsed_pct(qw, now, &el) || el < 1.0) return false;
     *out_pct = qw->used_pct / (el / 100.0);
+    return true;
+}
+
+bool ai_quota_projected_tokens(const ai_quota_window_t *qw, double now, int64_t *out_tokens) {
+    if (!qw->is_token_window || qw->window_tokens <= 0) return false;
+    double el = 0.0;
+    if (!ai_quota_elapsed_pct(qw, now, &el) || el < 1.0) return false;
+    double proj = (double)qw->window_tokens / (el / 100.0);
+    *out_tokens = (int64_t)llround(proj);
     return true;
 }
 
@@ -460,7 +540,7 @@ static sqlite3 *open_sqlite_ro(const char *path) {
     return NULL;
 }
 
-static void claude_quota(ai_provider_usage_t *pu, const char *base_dir) {
+static void claude_live_quota(ai_provider_usage_t *pu) {
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
@@ -542,57 +622,53 @@ static void claude_quota(ai_provider_usage_t *pu, const char *base_dir) {
             close(fd);
         }
     }
+}
+
+static void claude_quota(ai_provider_usage_t *pu, const char *base_dir) {
+    claude_live_quota(pu);
+    if (pu->n_quotas == 2) return;
+
+    int live_count = pu->n_quotas;
+    bool need_5h = live_count == 0 || strcmp(pu->quotas[0].label, "7d") == 0;
+    bool need_7d = live_count == 0 || strcmp(pu->quotas[0].label, "5h") == 0;
+    ai_quota_window_t history[] = {
+        {.label = "5h", .window_seconds = 5 * 3600, .from_history = true},
+        {.label = "7d", .window_seconds = 7 * 86400, .from_history = true},
+    };
+    const bool needed[] = {need_5h, need_7d};
+    const char *pct_keys[] = {"pct", "pct7"};
+    const char *reset_keys[] = {"reset", "reset7"};
+    bool found[2] = {false, false};
 
     char hist_path[1024];
     snprintf(hist_path, sizeof(hist_path), "%s/usage-history.jsonl", base_dir);
     FILE *f = fopen(hist_path, "rb");
     if (f) {
-        if (fseek(f, 0, SEEK_END) == 0) {
-            long sz = ftell(f);
-            long off = sz > 4096 ? sz - 4096 : 0;
-            fseek(f, off, SEEK_SET);
-            char buf[4097];
-            size_t nr = fread(buf, 1, 4096, f);
-            buf[nr] = '\0';
-            char *last_line = NULL;
-            char *saveptr = NULL;
-            for (char *tok = strtok_r(buf, "\r\n", &saveptr); tok; tok = strtok_r(NULL, "\r\n", &saveptr)) {
-                if (*tok) last_line = tok;
-            }
-            if (last_line) {
-                jspan_t root = {last_line, last_line + strlen(last_line)};
-                double upd = 0.0;
-                bool has_upd = jobj_get_double(root, "t", &upd);
-                double pct5 = 0.0;
-                if (jobj_get_double(root, "pct", &pct5)) {
-                    ai_quota_window_t *q = &pu->quotas[pu->n_quotas++];
-                    snprintf(q->label, sizeof(q->label), "5h");
-                    q->used_pct = pct5;
-                    q->window_seconds = 5 * 3600;
-                    q->has_reset = jobj_get_double(root, "reset", &q->reset_epoch);
-                    q->has_updated = has_upd;
-                    q->updated_epoch = upd;
-                }
-                double pct7 = 0.0;
-                if (jobj_get_double(root, "pct7", &pct7)) {
-                    ai_quota_window_t *q = &pu->quotas[pu->n_quotas++];
-                    snprintf(q->label, sizeof(q->label), "7d");
-                    q->used_pct = pct7;
-                    q->window_seconds = 7 * 86400;
-                    q->has_reset = jobj_get_double(root, "reset7", &q->reset_epoch);
-                    q->has_updated = has_upd;
-                    q->updated_epoch = upd;
-                }
-                if (pu->n_quotas > 0) {
-                    snprintf(pu->quota_note, sizeof(pu->quota_note), "usage-history.jsonl");
-                    fclose(f);
-                    return;
-                }
+        char *line = NULL;
+        size_t cap = 0;
+        ssize_t len;
+        while ((len = getline(&line, &cap, f)) >= 0) {
+            jspan_t root = {line, line + len};
+            for (int w = 0; w < 2; ++w) {
+                ai_quota_window_t *q = &history[w];
+                if (!needed[w] || !jobj_get_double(root, pct_keys[w], &q->used_pct)) continue;
+                q->has_reset = jobj_get_double(root, reset_keys[w], &q->reset_epoch);
+                q->has_updated = jobj_get_double(root, "t", &q->updated_epoch);
+                found[w] = true;
             }
         }
+        free(line);
         fclose(f);
     }
-    snprintf(pu->quota_note, sizeof(pu->quota_note), "unavailable");
+    for (int w = 0; w < 2; ++w) {
+        if (found[w]) pu->quotas[pu->n_quotas++] = history[w];
+    }
+    if (pu->n_quotas > live_count) {
+        snprintf(pu->quota_note, sizeof(pu->quota_note), "%s",
+                 live_count ? "live daemon + saved history" : "usage-history.jsonl");
+    } else if (pu->n_quotas == 0) {
+        snprintf(pu->quota_note, sizeof(pu->quota_note), "unavailable");
+    }
 }
 
 static void collect_claude(ai_provider_usage_t *pu, const char *base_dir, double cutoff_epoch) {
@@ -687,7 +763,8 @@ static void collect_claude(ai_provider_usage_t *pu, const char *base_dir, double
                 reas = jobj_get_i64(details, "thinking_tokens", 0);
             }
 
-            int64_t tok = record_turn(pu, ts, model, inp, cache_r, cache_w, out, reas);
+            reas = reas > 0 && out > 0 ? (reas < out ? reas : out) : 0;
+            int64_t tok = record_turn(pu, ts, model, inp, cache_r, cache_w, out - reas, reas);
 
             char sid[128];
             if (!jobj_get_str(root, "sessionId", sid, sizeof(sid)) || !*sid) {
@@ -846,20 +923,20 @@ static void collect_codex(ai_provider_usage_t *pu, const char *base_dir, double 
                 }
                 jspan_t rl;
                 if (jobj_find(payload, "rate_limits", &rl) && !jspan_is_null(rl) && ts >= latest_rl_ts) {
-                    latest_rl_ts = ts;
-                    has_rl = true;
-                    rl_nq = 0;
-                    if (!jobj_get_str(rl, "plan_type", rl_plan, sizeof(rl_plan)) || !*rl_plan) {
-                        snprintf(rl_plan, sizeof(rl_plan), "codex");
+                    char cur_plan[32] = "codex";
+                    if (!jobj_get_str(rl, "plan_type", cur_plan, sizeof(cur_plan)) || !*cur_plan) {
+                        snprintf(cur_plan, sizeof(cur_plan), "codex");
                     }
                     const char *keys[2] = {"primary", "secondary"};
                     const char *labels[2] = {"5h", "7d"};
                     const int def_wins[2] = {5 * 3600, 7 * 86400};
+                    ai_quota_window_t cur_q[2];
+                    int cur_nq = 0;
                     for (int w = 0; w < 2; ++w) {
                         jspan_t win;
                         double upct = 0.0;
-                        if (jobj_find(rl, keys[w], &win) && jobj_get_double(win, "used_percent", &upct)) {
-                            ai_quota_window_t *qw = &rl_q[rl_nq++];
+                        if (jobj_find(rl, keys[w], &win) && !jspan_is_null(win) && jobj_get_double(win, "used_percent", &upct)) {
+                            ai_quota_window_t *qw = &cur_q[cur_nq++];
                             memset(qw, 0, sizeof(*qw));
                             snprintf(qw->label, sizeof(qw->label), "%s", labels[w]);
                             qw->used_pct = upct;
@@ -867,8 +944,15 @@ static void collect_codex(ai_provider_usage_t *pu, const char *base_dir, double 
                             qw->window_seconds = (int)(wmin * 60);
                             qw->has_reset = jobj_get_double(win, "resets_at", &qw->reset_epoch);
                             qw->has_updated = true;
-                            qw->updated_epoch = latest_rl_ts;
+                            qw->updated_epoch = ts;
                         }
+                    }
+                    if (cur_nq > 0) {
+                        latest_rl_ts = ts;
+                        has_rl = true;
+                        rl_nq = cur_nq;
+                        snprintf(rl_plan, sizeof(rl_plan), "%s", cur_plan);
+                        for (int k = 0; k < cur_nq; ++k) rl_q[k] = cur_q[k];
                     }
                 }
 
@@ -925,7 +1009,8 @@ static void collect_codex(ai_provider_usage_t *pu, const char *base_dir, double 
                 if (cutoff_epoch > 0.0 && ts < cutoff_epoch) continue;
                 /* Codex input_tokens includes cached_input_tokens; subtract to keep total exact. */
                 int64_t non_cached_inp = inp > cache_r ? inp - cache_r : 0;
-                int64_t tok = record_turn(pu, ts, cur_model, non_cached_inp, cache_r, cache_w, out, reas);
+                reas = reas > 0 && out > 0 ? (reas < out ? reas : out) : 0;
+                int64_t tok = record_turn(pu, ts, cur_model, non_cached_inp, cache_r, cache_w, out - reas, reas);
 
                 ai_session_info_t *s = session_get_or_add(pu, sid);
                 if (s) {
@@ -1219,15 +1304,13 @@ static void collect_antigravity(
     memset(q5, 0, sizeof(*q5));
     snprintf(q5->label, sizeof(q5->label), "5h");
     q5->window_seconds = 5 * 3600;
-    q5->is_token_window = true;
+    q5->is_token_window = false;
     q5->window_tokens = tok_5h;
     q5->window_turns = turns_5h;
     q5->used_pct = ((double)tok_5h / 50e6) * 100.0;
     if (q5->used_pct > 100.0) q5->used_pct = 100.0;
-    if (oldest_5h > 0.0) {
-        q5->has_reset = true;
-        q5->reset_epoch = oldest_5h + 5.0 * 3600.0;
-    }
+    q5->has_reset = true;
+    q5->reset_epoch = (oldest_5h > 0.0) ? (oldest_5h + 5.0 * 3600.0) : (now_epoch + 5.0 * 3600.0);
     q5->has_updated = true;
     q5->updated_epoch = now_epoch;
 
@@ -1235,22 +1318,20 @@ static void collect_antigravity(
     memset(q7, 0, sizeof(*q7));
     snprintf(q7->label, sizeof(q7->label), "7d");
     q7->window_seconds = 7 * 86400;
-    q7->is_token_window = true;
+    q7->is_token_window = false;
     q7->window_tokens = tok_7d;
     q7->window_turns = turns_7d;
     q7->used_pct = ((double)tok_7d / 250e6) * 100.0;
     if (q7->used_pct > 100.0) q7->used_pct = 100.0;
-    if (oldest_7d > 0.0) {
-        q7->has_reset = true;
-        q7->reset_epoch = oldest_7d + 7.0 * 86400.0;
-    }
+    q7->has_reset = true;
+    q7->reset_epoch = (oldest_7d > 0.0) ? (oldest_7d + 7.0 * 86400.0) : (now_epoch + 7.0 * 86400.0);
     q7->has_updated = true;
     q7->updated_epoch = now_epoch;
 
     snprintf(
         pu->quota_note,
         sizeof(pu->quota_note),
-        "rolling tokens (no server %% cap exposed)"
+        "rolling window (50M/250M ref)"
     );
 }
 

@@ -38,9 +38,32 @@ int main(void) {
     CHECK(ai_quota_elapsed_pct(&qw, now, &el) && fabs(el - 50.0) < 1e-6);
     CHECK(ai_quota_projected_pct(&qw, now, &proj) && fabs(proj - 50.0) < 1e-6);
 
+    ai_grouped_quota_t *quotas = NULL;
+    size_t n_quotas = ai_antigravity_parse_quotas(
+        "{\"command\":{\"data\":{\"groups\":["
+        "{\"name\":\"Gemini Models\",\"buckets\":["
+        "{\"window\":\"weekly\",\"remaining_fraction\":0.94,\"reset_time\":\"2026-11-15T10:19:49Z\"},"
+        "{\"window\":\"5h\",\"remaining_fraction\":1,\"reset_time\":\"2026-11-09T00:39:19Z\"}]},"
+        "{\"name\":\"Gemini 4 Argon\",\"buckets\":["
+        "{\"window\":\"weekly\",\"remaining_fraction\":0,\"reset_time\":null}]}]}}}",
+        &quotas
+    );
+    CHECK(n_quotas == 3);
+    CHECK(strcmp(quotas[0].group, "Gemini Models") == 0);
+    CHECK(strcmp(quotas[0].window.label, "5h") == 0);
+    CHECK(strcmp(quotas[1].window.label, "7d") == 0);
+    CHECK(fabs(quotas[1].window.used_pct - 6.0) < 1e-6);
+    CHECK(quotas[0].window.has_reset);
+    CHECK(ai_quota_elapsed_pct(&quotas[0].window, quotas[0].window.reset_epoch - 9000, &el));
+    CHECK(fabs(el - 50.0) < 1e-6);
+    CHECK(strcmp(quotas[2].group, "Gemini 4 Argon") == 0);
+    CHECK(quotas[2].window.used_pct == 100.0 && !quotas[2].window.has_reset);
+    free(quotas);
+
     char tpl[] = "/tmp/ai-usage-test-XXXXXX";
     char *root = mkdtemp(tpl);
     CHECK(root != NULL);
+    CHECK(setenv("XDG_RUNTIME_DIR", root, 1) == 0);
 
     char cmd[512];
     snprintf(
@@ -55,7 +78,10 @@ int main(void) {
 
     char pbuf[512];
     snprintf(pbuf, sizeof(pbuf), "%s/claude/usage-history.jsonl", root);
-    CHECK(write_text(pbuf, "{\"t\":1794131913,\"pct\":12.0,\"reset\":1794146400,\"pct7\":34.0,\"reset7\":1794567600}\n") == 0);
+    CHECK(write_text(pbuf,
+        "{\"t\":1794131913,\"pct\":12.0,\"reset\":1794146400,\"pct7\":34.0,\"reset7\":1794567600}\n"
+        "{\"t\":1794131950,\"pct\":13.0,\"reset\":1794146400,\"pct7\":null,\"reset7\":null}\n"
+    ) == 0);
 
     snprintf(pbuf, sizeof(pbuf), "%s/claude/projects/demo/sess1.jsonl", root);
     CHECK(
@@ -98,10 +124,18 @@ int main(void) {
     ai_usage_report_t rep;
     ai_usage_collect(&rep, 0, AI_PROVIDER_ALL, 1794132000.0, cdir, xdir, gdir);
     CHECK(rep.n_providers == 3);
-    CHECK(ai_token_stats_total(&rep.providers[0].totals) == 650);
+    CHECK(rep.providers[0].n_quotas == 2);
+    CHECK(rep.providers[0].quotas[0].used_pct == 13.0);
+    CHECK(rep.providers[0].quotas[1].used_pct == 34.0);
+    CHECK(rep.providers[0].quotas[1].from_history);
+    CHECK(rep.providers[0].totals.output_tokens == 60);
+    CHECK(rep.providers[0].totals.reasoning_tokens == 20);
+    CHECK(ai_token_stats_total(&rep.providers[0].totals) == 630);
     CHECK(rep.providers[1].totals.input_tokens == 400);
     CHECK(rep.providers[1].totals.cache_read_tokens == 600);
-    CHECK(ai_token_stats_total(&rep.providers[1].totals) == 1250);
+    CHECK(rep.providers[1].totals.output_tokens == 150);
+    CHECK(rep.providers[1].totals.reasoning_tokens == 50);
+    CHECK(ai_token_stats_total(&rep.providers[1].totals) == 1200);
     CHECK(ai_token_stats_total(&rep.providers[2].totals) == 2120);
 
     char *json = ai_usage_report_to_json(&rep);

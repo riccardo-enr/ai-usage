@@ -118,24 +118,14 @@ static void render_report(
 
             snprintf(q_buf[n_qrows][0], 64, "%s", pu->provider);
             snprintf(q_buf[n_qrows][1], 64, "%s", qw->label);
-            if (qw->is_token_window) {
-                char t_s[24];
-                ai_fmt_tokens(qw->window_tokens, t_s, sizeof(t_s));
-                snprintf(
-                    q_buf[n_qrows][2],
-                    64,
-                    "%s %.12s (%lldt)",
-                    bar,
-                    t_s,
-                    (long long)qw->window_turns
-                );
-            } else {
-                snprintf(q_buf[n_qrows][2], 64, "%s %5.1f%%", bar, qw->used_pct);
-            }
+            snprintf(q_buf[n_qrows][2], 64, "%s %5.1f%%", bar, qw->used_pct);
             if (qw->has_reset) ai_fmt_duration(qw->reset_epoch - now, q_buf[n_qrows][3], 64);
             else snprintf(q_buf[n_qrows][3], 64, "-");
-            if (!qw->is_token_window && has_proj) snprintf(q_buf[n_qrows][4], 64, "~%.0f%%", proj);
-            else snprintf(q_buf[n_qrows][4], 64, "-");
+            if (has_proj) {
+                snprintf(q_buf[n_qrows][4], 64, "~%.0f%%", proj);
+            } else {
+                snprintf(q_buf[n_qrows][4], 64, "-");
+            }
             snprintf(q_buf[n_qrows][5], 64, "%s", pu->quota_note);
             for (int c = 0; c < 6; ++c) q_cells[n_qrows][c] = q_buf[n_qrows][c];
             ++n_qrows;

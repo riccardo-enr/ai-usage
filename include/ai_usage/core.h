@@ -33,10 +33,16 @@ typedef struct {
     bool has_reset;
     double updated_epoch;
     bool has_updated;
+    bool from_history;
     bool is_token_window;
     int64_t window_tokens;
     int64_t window_turns;
 } ai_quota_window_t;
+
+typedef struct {
+    char group[128];
+    ai_quota_window_t window;
+} ai_grouped_quota_t;
 
 typedef struct {
     char provider[16];
@@ -84,6 +90,8 @@ void ai_token_stats_add(ai_token_stats_t *dst, const ai_token_stats_t *src);
 
 bool ai_quota_elapsed_pct(const ai_quota_window_t *qw, double now, double *out_pct);
 bool ai_quota_projected_pct(const ai_quota_window_t *qw, double now, double *out_pct);
+bool ai_quota_projected_tokens(const ai_quota_window_t *qw, double now, int64_t *out_tokens);
+size_t ai_antigravity_parse_quotas(const char *json, ai_grouped_quota_t **out);
 
 void ai_fmt_tokens(int64_t n, char *buf, size_t cap);
 void ai_fmt_duration(double seconds, char *buf, size_t cap);

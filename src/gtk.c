@@ -55,7 +55,6 @@ typedef struct {
     double used_pct;
     double elapsed_pct;
     bool has_elapsed;
-    bool is_token_window;
 } bar_data_t;
 
 typedef struct {
@@ -107,6 +106,8 @@ typedef struct {
     int days;
     int mask;
     ai_usage_report_t report;
+    ai_grouped_quota_t *antigravity_quotas;
+    size_t n_antigravity_quotas;
     double elapsed_ms;
 } worker_ctx_t;
 
@@ -156,10 +157,8 @@ static void draw_quota_bar(
         rounded_rect(cr, 0, 0, width, height, r);
         cairo_clip(cr);
 
-        if (bd->is_token_window) {
-            cairo_set_source_rgba(cr, 0.28, 0.74, 0.56, 0.90);
-        } else if (clamped >= 90.0 ||
-                   (bd->has_elapsed && bd->elapsed_pct >= 5.0 && bd->used_pct > bd->elapsed_pct * 1.25)) {
+        if (clamped >= 90.0 ||
+            (bd->has_elapsed && bd->elapsed_pct >= 5.0 && bd->used_pct > bd->elapsed_pct * 1.25)) {
             cairo_set_source_rgba(cr, 0.90, 0.32, 0.28, 0.92);
         } else if (clamped >= 75.0 ||
                    (bd->has_elapsed && bd->elapsed_pct >= 5.0 && bd->used_pct > bd->elapsed_pct * 1.05)) {
@@ -187,8 +186,7 @@ static void draw_quota_bar(
 static GtkWidget *make_quota_drawing_area(
     double used_pct,
     bool has_elapsed,
-    double elapsed_pct,
-    bool is_token_window
+    double elapsed_pct
 ) {
     GtkWidget *area = gtk_drawing_area_new();
     gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), 16);
@@ -197,7 +195,6 @@ static GtkWidget *make_quota_drawing_area(
     bd->used_pct = used_pct;
     bd->has_elapsed = has_elapsed;
     bd->elapsed_pct = elapsed_pct;
-    bd->is_token_window = is_token_window;
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), draw_quota_bar, bd, g_free);
     return area;
 }
@@ -584,11 +581,94 @@ static GtkWidget *create_table_card(
     return card;
 }
 
-static void populate_overview(app_ui_t *ui, const ai_usage_report_t *rep) {
-    clear_box(ui->overview_box);
-    double now = rep->generated_at;
+static GtkWidget *make_quota_row(const ai_quota_window_t *qw, double now, bool rolling) {
+    bool expired = qw->has_reset && qw->reset_epoch <= now;
+    double el = 0.0;
+    bool has_el = !rolling && !expired && ai_quota_elapsed_pct(qw, now, &el);
 
-    GtkWidget *q_hdr = gtk_label_new("Quota & Rate Limits (| = elapsed window marker)");
+    GtkWidget *w_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    GtkWidget *w_lbl = gtk_label_new(qw->label);
+    gtk_widget_add_css_class(w_lbl, "mono-cell");
+    gtk_widget_set_size_request(w_lbl, 36, -1);
+    gtk_box_append(GTK_BOX(w_row), w_lbl);
+
+    GtkWidget *bar = make_quota_drawing_area(qw->used_pct, has_el, el);
+    if (expired) gtk_widget_set_opacity(bar, 0.45);
+    gtk_box_append(GTK_BOX(w_row), bar);
+
+    char meta_txt[160];
+    double left = 100.0 - CLAMP(qw->used_pct, 0.0, 100.0);
+    const char *reading = qw->from_history ? " (last recorded)" : "";
+    if (rolling) {
+        char tokens[24];
+        ai_fmt_tokens(qw->window_tokens, tokens, sizeof(tokens));
+        snprintf(meta_txt, sizeof(meta_txt), "%s tokens (%lld turns) | %.1f%% of reference",
+                 tokens, (long long)qw->window_turns, qw->used_pct);
+    } else if (expired) {
+        snprintf(meta_txt, sizeof(meta_txt), "Awaiting update | Last reading %.1f%% left", left);
+    } else if (qw->has_reset) {
+        char remaining[32];
+        ai_fmt_duration(qw->reset_epoch - now, remaining, sizeof(remaining));
+        g_autoptr(GDateTime) reset = g_date_time_new_from_unix_local((gint64)qw->reset_epoch);
+        g_autofree char *reset_time = reset ? g_date_time_format(reset, "%a %d %b, %H:%M") : NULL;
+        snprintf(meta_txt, sizeof(meta_txt), "%.1f%% left%s | Resets %s (in %s)",
+                 left, reading, reset_time ? reset_time : "soon", remaining);
+    } else {
+        snprintf(meta_txt, sizeof(meta_txt), "%.1f%% left%s | Reset unknown", left, reading);
+    }
+    GtkWidget *meta_lbl = gtk_label_new(meta_txt);
+    gtk_label_set_xalign(GTK_LABEL(meta_lbl), 1.0f);
+    gtk_label_set_wrap(GTK_LABEL(meta_lbl), TRUE);
+    gtk_widget_add_css_class(meta_lbl, "metric-sub");
+    gtk_box_append(GTK_BOX(w_row), meta_lbl);
+
+    return w_row;
+}
+
+static void append_today_usage(GtkWidget *overview, const ai_usage_report_t *rep) {
+    g_autoptr(GDateTime) now = g_date_time_new_now_local();
+    g_autofree char *day = g_date_time_format(now, "%F");
+    GtkWidget *heading = gtk_label_new("Today's Token Usage");
+    gtk_label_set_xalign(GTK_LABEL(heading), 0.0f);
+    gtk_widget_add_css_class(heading, "section-header");
+    gtk_box_append(GTK_BOX(overview), heading);
+
+    GtkWidget *flow = gtk_flow_box_new();
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(flow), GTK_SELECTION_NONE);
+    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(flow), TRUE);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(flow), 3);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(flow), 10);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(flow), 10);
+    for (int i = 0; i < rep->n_providers; ++i) {
+        const ai_provider_usage_t *provider = &rep->providers[i];
+        int64_t total = 0;
+        for (int d = 0; d < provider->n_days; ++d) {
+            if (strcmp(provider->by_day[d].key, day) == 0) {
+                total = ai_token_stats_total(&provider->by_day[d].stats);
+                break;
+            }
+        }
+        char tokens[32];
+        ai_fmt_tokens(total, tokens, sizeof(tokens));
+        GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+        gtk_widget_add_css_class(card, "card-box");
+        GtkWidget *name = gtk_label_new(provider->provider);
+        gtk_widget_add_css_class(name, "metric-title");
+        GtkWidget *value = gtk_label_new(tokens);
+        gtk_widget_add_css_class(value, "metric-value");
+        gtk_box_append(GTK_BOX(card), name);
+        gtk_box_append(GTK_BOX(card), value);
+        gtk_flow_box_append(GTK_FLOW_BOX(flow), card);
+    }
+    gtk_box_append(GTK_BOX(overview), flow);
+}
+
+static void populate_overview(app_ui_t *ui, const worker_ctx_t *ctx) {
+    const ai_usage_report_t *rep = &ctx->report;
+    clear_box(ui->overview_box);
+    double now = (double)g_get_real_time() / G_USEC_PER_SEC;
+
+    GtkWidget *q_hdr = gtk_label_new("Quota Remaining");
     gtk_label_set_xalign(GTK_LABEL(q_hdr), 0.0f);
     gtk_widget_add_css_class(q_hdr, "section-header");
     gtk_box_append(GTK_BOX(ui->overview_box), q_hdr);
@@ -610,8 +690,11 @@ static void populate_overview(app_ui_t *ui, const ai_usage_report_t *rep) {
         gtk_widget_add_css_class(badge, "provider-badge");
         gtk_box_append(GTK_BOX(top_row), badge);
 
+        bool antigravity = strcmp(pu->provider, "antigravity") == 0;
+        bool live_quotas = antigravity && ctx->n_antigravity_quotas > 0;
+        const char *source = live_quotas ? "Antigravity CLI /usage" : pu->quota_note;
         char src_txt[128];
-        snprintf(src_txt, sizeof(src_txt), "source: %s", pu->quota_note[0] ? pu->quota_note : "-");
+        snprintf(src_txt, sizeof(src_txt), "source: %s", *source ? source : "-");
         GtkWidget *src_lbl = gtk_label_new(src_txt);
         gtk_label_set_xalign(GTK_LABEL(src_lbl), 1.0f);
         gtk_widget_set_hexpand(src_lbl, TRUE);
@@ -619,67 +702,64 @@ static void populate_overview(app_ui_t *ui, const ai_usage_report_t *rep) {
         gtk_box_append(GTK_BOX(top_row), src_lbl);
         gtk_box_append(GTK_BOX(card), top_row);
 
-        for (int q = 0; q < pu->n_quotas; ++q) {
-            const ai_quota_window_t *qw = &pu->quotas[q];
-            double el = 0.0, proj = 0.0;
-            bool has_el = ai_quota_elapsed_pct(qw, now, &el);
-            bool has_proj = ai_quota_projected_pct(qw, now, &proj);
-
-            char rem_s[32] = "-";
-            if (qw->has_reset) {
-                ai_fmt_duration(qw->reset_epoch - now, rem_s, sizeof(rem_s));
+        bool claude = strcmp(pu->provider, "claude") == 0;
+        if (live_quotas) {
+            const char *previous_group = "";
+            for (size_t q = 0; q < ctx->n_antigravity_quotas; ++q) {
+                const ai_grouped_quota_t *quota = &ctx->antigravity_quotas[q];
+                if (strcmp(previous_group, quota->group) != 0) {
+                    GtkWidget *group = gtk_label_new(quota->group);
+                    gtk_label_set_xalign(GTK_LABEL(group), 0.0f);
+                    gtk_widget_add_css_class(group, "metric-title");
+                    gtk_box_append(GTK_BOX(card), group);
+                    previous_group = quota->group;
+                }
+                gtk_box_append(GTK_BOX(card), make_quota_row(&quota->window, now, false));
             }
-            char el_s[32], proj_s[32];
-            if (has_el) snprintf(el_s, sizeof(el_s), "%.0f%% elapsed", el);
-            else snprintf(el_s, sizeof(el_s), "elapsed n/a");
-            if (has_proj) snprintf(proj_s, sizeof(proj_s), "proj ~%.0f%%", proj);
-            else snprintf(proj_s, sizeof(proj_s), "proj n/a");
-
-            GtkWidget *w_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-            char w_lbl_txt[16];
-            snprintf(w_lbl_txt, sizeof(w_lbl_txt), "%3s", qw->label);
-            GtkWidget *w_lbl = gtk_label_new(w_lbl_txt);
-            gtk_widget_add_css_class(w_lbl, "mono-cell");
-            gtk_widget_set_size_request(w_lbl, 36, -1);
-            gtk_box_append(GTK_BOX(w_row), w_lbl);
-
-            GtkWidget *bar = make_quota_drawing_area(qw->used_pct, has_el, el, qw->is_token_window);
-            gtk_box_append(GTK_BOX(w_row), bar);
-
-            char meta_txt[160];
-            if (qw->is_token_window) {
-                char t_s[24];
-                ai_fmt_tokens(qw->window_tokens, t_s, sizeof(t_s));
-                snprintf(
-                    meta_txt,
-                    sizeof(meta_txt),
-                    "%6s (%3lldt)  |  ages out %7s  |  %11s  |    no %% cap",
-                    t_s,
-                    (long long)qw->window_turns,
-                    rem_s,
-                    el_s
-                );
-            } else {
-                snprintf(
-                    meta_txt,
-                    sizeof(meta_txt),
-                    "%5.1f%%  |  resets in %7s  |  %11s  |  %10s",
-                    qw->used_pct,
-                    rem_s,
-                    el_s,
-                    proj_s
-                );
+            gtk_box_append(GTK_BOX(q_list), card);
+            continue;
+        }
+        if (antigravity) {
+            GtkWidget *empty = gtk_label_new("Provider quotas unavailable. Local usage below.");
+            gtk_label_set_xalign(GTK_LABEL(empty), 0.0f);
+            gtk_widget_add_css_class(empty, "metric-sub");
+            gtk_box_append(GTK_BOX(card), empty);
+        }
+        const char *claude_labels[] = {"5h", "7d"};
+        const ai_quota_window_t *claude_windows[2] = {NULL, NULL};
+        if (claude) {
+            for (int q = 0; q < pu->n_quotas; ++q) {
+                for (int w = 0; w < 2; ++w) {
+                    if (strcmp(pu->quotas[q].label, claude_labels[w]) == 0) {
+                        claude_windows[w] = &pu->quotas[q];
+                    }
+                }
             }
-            GtkWidget *meta_lbl = gtk_label_new(meta_txt);
-            gtk_label_set_xalign(GTK_LABEL(meta_lbl), 1.0f);
-            gtk_widget_add_css_class(meta_lbl, "metric-sub");
-            gtk_box_append(GTK_BOX(w_row), meta_lbl);
-
-            gtk_box_append(GTK_BOX(card), w_row);
+        }
+        int n_windows = claude ? 2 : pu->n_quotas;
+        for (int q = 0; q < n_windows; ++q) {
+            const ai_quota_window_t *qw = claude ? claude_windows[q] : &pu->quotas[q];
+            if (!qw) {
+                char unavailable[48];
+                snprintf(unavailable, sizeof(unavailable), "%s quota unavailable", claude_labels[q]);
+                GtkWidget *empty = gtk_label_new(unavailable);
+                gtk_label_set_xalign(GTK_LABEL(empty), 0.0f);
+                gtk_widget_add_css_class(empty, "metric-sub");
+                gtk_box_append(GTK_BOX(card), empty);
+                continue;
+            }
+            gtk_box_append(GTK_BOX(card), make_quota_row(qw, now, antigravity));
+        }
+        if (n_windows == 0) {
+            GtkWidget *empty = gtk_label_new("No quota data available");
+            gtk_label_set_xalign(GTK_LABEL(empty), 0.0f);
+            gtk_widget_add_css_class(empty, "metric-sub");
+            gtk_box_append(GTK_BOX(card), empty);
         }
         gtk_box_append(GTK_BOX(q_list), card);
     }
     gtk_box_append(GTK_BOX(ui->overview_box), q_list);
+    append_today_usage(ui->overview_box, rep);
 
     char win_hdr_txt[96];
     if (rep->days > 0) {
@@ -1045,30 +1125,65 @@ static void populate_sessions(app_ui_t *ui, const ai_usage_report_t *rep) {
     gtk_box_append(GTK_BOX(ui->sessions_box), create_table_card(6, headers, ralign, n_rows, cells));
 }
 
+static void refresh_async(app_ui_t *ui);
+
 static gboolean apply_report_idle(gpointer data) {
     worker_ctx_t *ctx = (worker_ctx_t *)data;
     app_ui_t *ui = ctx->ui;
 
     ui->loading = false;
-    gtk_widget_set_sensitive(ui->refresh_btn, TRUE);
-    char status_txt[64];
-    snprintf(status_txt, sizeof(status_txt), "%.0f ms", ctx->elapsed_ms);
-    gtk_label_set_text(GTK_LABEL(ui->status_label), status_txt);
+    if (ctx->days != ui->selected_days || ctx->mask != ui->selected_mask) {
+        ai_usage_report_free(&ctx->report);
+        free(ctx->antigravity_quotas);
+        g_free(ctx);
+        refresh_async(ui);
+        return G_SOURCE_REMOVE;
+    }
 
-    populate_overview(ui, &ctx->report);
+    gtk_widget_set_sensitive(ui->refresh_btn, TRUE);
+    GDateTime *updated = g_date_time_new_from_unix_local((gint64)ctx->report.generated_at);
+    char *status = g_date_time_format(updated, "Updated %H:%M:%S");
+    gtk_label_set_text(GTK_LABEL(ui->status_label), status);
+    g_free(status);
+    g_date_time_unref(updated);
+    char timing[64];
+    snprintf(timing, sizeof(timing), "Data collection took %.0f ms", ctx->elapsed_ms);
+    gtk_widget_set_tooltip_text(ui->status_label, timing);
+
+    populate_overview(ui, ctx);
     populate_models(ui, &ctx->report);
     populate_daily(ui, &ctx->report);
     populate_sessions(ui, &ctx->report);
 
     ai_usage_report_free(&ctx->report);
+    free(ctx->antigravity_quotas);
     g_free(ctx);
     return G_SOURCE_REMOVE;
+}
+
+static void collect_antigravity_quotas(worker_ctx_t *ctx) {
+    g_autofree char *agy = g_find_program_in_path("agy");
+    if (!agy) {
+        agy = g_build_filename(g_get_home_dir(), ".local", "bin", "agy", NULL);
+        if (!g_file_test(agy, G_FILE_TEST_IS_EXECUTABLE)) return;
+    }
+
+    char *argv[] = {"timeout", "--kill-after=1s", "12s", agy,
+                    "-p", "/usage", "--output-format", "json", NULL};
+    g_autofree char *output = NULL;
+    int status;
+    if (g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDERR_TO_DEV_NULL,
+                     NULL, NULL, &output, NULL, &status, NULL) &&
+        g_spawn_check_wait_status(status, NULL)) {
+        ctx->n_antigravity_quotas = ai_antigravity_parse_quotas(output, &ctx->antigravity_quotas);
+    }
 }
 
 static gpointer worker_thread_fn(gpointer data) {
     worker_ctx_t *ctx = (worker_ctx_t *)data;
     gint64 t0 = g_get_monotonic_time();
     ai_usage_collect(&ctx->report, ctx->days, ctx->mask, 0.0, NULL, NULL, NULL);
+    if (ctx->mask & AI_PROVIDER_ANTIGRAVITY) collect_antigravity_quotas(ctx);
     ctx->elapsed_ms = (double)(g_get_monotonic_time() - t0) / 1000.0;
     g_idle_add(apply_report_idle, ctx);
     return NULL;
@@ -1078,7 +1193,8 @@ static void refresh_async(app_ui_t *ui) {
     if (ui->loading) return;
     ui->loading = true;
     gtk_widget_set_sensitive(ui->refresh_btn, FALSE);
-    gtk_label_set_text(GTK_LABEL(ui->status_label), "...");
+    gtk_label_set_text(GTK_LABEL(ui->status_label), "Refreshing...");
+    gtk_widget_set_tooltip_text(ui->status_label, NULL);
 
     worker_ctx_t *ctx = g_new0(worker_ctx_t, 1);
     ctx->ui = ui;
@@ -1153,7 +1269,13 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
             display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
         );
         g_object_unref(provider);
+
+        GtkIconTheme *theme = gtk_icon_theme_get_for_display(display);
+        if (theme) {
+            gtk_icon_theme_add_search_path(theme, "/home/riccardo/code/ai/ai-usage/assets");
+        }
     }
+    gtk_window_set_default_icon_name("com.riccardo.AiUsage");
 
     app_ui_t *ui = g_new0(app_ui_t, 1);
     ui->selected_days = 7;
@@ -1161,6 +1283,7 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
 
     ui->win = ADW_APPLICATION_WINDOW(adw_application_window_new(GTK_APPLICATION(app)));
     gtk_window_set_title(GTK_WINDOW(ui->win), "AI Usage");
+    gtk_window_set_icon_name(GTK_WINDOW(ui->win), "com.riccardo.AiUsage");
     gtk_window_set_default_size(GTK_WINDOW(ui->win), 1140, 820);
 
     GtkWidget *toolbar = adw_toolbar_view_new();
@@ -1249,6 +1372,8 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
 }
 
 int main(int argc, char **argv) {
+    g_set_prgname("com.riccardo.AiUsage");
+    g_set_application_name("AI Usage");
     AdwApplication *app = adw_application_new("com.riccardo.AiUsage", G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
     int status = g_application_run(G_APPLICATION(app), argc, argv);
