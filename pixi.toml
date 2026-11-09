@@ -15,4 +15,5 @@ sessions = { cmd = "./build/ai-usage --sessions", depends-on = ["build"] }
 daily = { cmd = "./build/ai-usage --daily", depends-on = ["build"] }
 json = { cmd = "./build/ai-usage --json", depends-on = ["build"] }
 gui = { cmd = "./build/ai-usage-gtk", depends-on = ["build"] }
+install = { cmd = "cmake --install build --prefix ~/.local", depends-on = ["build"] }
 test = { cmd = "ctest --test-dir build --output-on-failure", depends-on = ["build"] }
