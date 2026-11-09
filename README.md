@@ -34,9 +34,11 @@ desktop session's PATH. You can also run `~/.local/bin/ai-usage-gtk` directly.
 
 ## Quota readings
 
-- Claude quota comes from the local Claude Code Monitor socket, with saved
-  readings from `~/.claude/usage-history.jsonl` as a fallback. If the monitor
-  stops returning quota, the dashboard can only show the last recorded reading.
+- Claude quota comes from the local Claude Code Monitor socket. With an updated
+  monitor that supports the quota-only snapshot, the dashboard can read Claude
+  Code's status-line quota even if the monitor's CLI poll fails. Older monitors
+  still work through the regular snapshot. Saved readings from
+  `~/.claude/usage-history.jsonl` are used when a live window is unavailable.
 - Codex quota comes from local session logs and refreshes when Codex records a
   new quota snapshot.
 - Antigravity provider quota comes from its CLI when available. The dashboard

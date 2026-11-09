@@ -559,7 +559,7 @@ static void claude_live_quota(ai_provider_usage_t *pu) {
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-                const char *req = "{\"query\":\"snapshot\"}\n";
+                const char *req = "{\"query\":\"snapshot\",\"quota_only\":true}\n";
                 if (send(fd, req, strlen(req), 0) > 0) {
                     size_t cap = 65536;
                     char *buf = malloc(cap);
@@ -604,10 +604,12 @@ static void claude_live_quota(ai_provider_usage_t *pu) {
                                 }
                                 if (pu->n_quotas > 0) {
                                     char mix[64] = "";
-                                    if (jobj_get_str(usage, "model_mix", mix, sizeof(mix)) && *mix) {
-                                        snprintf(pu->quota_note, sizeof(pu->quota_note), "live daemon (%.42s)", mix);
-                                    } else {
-                                        snprintf(pu->quota_note, sizeof(pu->quota_note), "live daemon");
+                                    if (!jobj_get_str(root, "quota_source", pu->quota_note, sizeof(pu->quota_note))) {
+                                        if (jobj_get_str(usage, "model_mix", mix, sizeof(mix)) && *mix) {
+                                            snprintf(pu->quota_note, sizeof(pu->quota_note), "live daemon (%.42s)", mix);
+                                        } else {
+                                            snprintf(pu->quota_note, sizeof(pu->quota_note), "live daemon");
+                                        }
                                     }
                                     free(buf);
                                     close(fd);
