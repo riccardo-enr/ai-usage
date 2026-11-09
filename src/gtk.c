@@ -596,7 +596,7 @@ static GtkWidget *make_quota_row(const ai_quota_window_t *qw, double now, bool r
     if (expired) gtk_widget_set_opacity(bar, 0.45);
     gtk_box_append(GTK_BOX(w_row), bar);
 
-    char meta_txt[160];
+    char meta_txt[224];
     const char *reading = qw->from_history ? " (last recorded)" : "";
     if (rolling) {
         char tokens[24];
@@ -612,6 +612,13 @@ static GtkWidget *make_quota_row(const ai_quota_window_t *qw, double now, bool r
         g_autofree char *reset_time = reset ? g_date_time_format(reset, "%a %d %b, %H:%M") : NULL;
         snprintf(meta_txt, sizeof(meta_txt), "%.1f%% used%s | Resets %s (in %s)",
                  qw->used_pct, reading, reset_time ? reset_time : "soon", remaining);
+        double projected = 0.0;
+        double observed_at = qw->has_updated ? MIN(qw->updated_epoch, now) : now;
+        if ((!qw->from_history || qw->has_updated) &&
+            ai_quota_projected_pct(qw, observed_at, &projected)) {
+            size_t len = strlen(meta_txt);
+            snprintf(meta_txt + len, sizeof(meta_txt) - len, " | Pace: %.0f%% by reset", projected);
+        }
     } else {
         snprintf(meta_txt, sizeof(meta_txt), "%.1f%% used%s | Reset unknown", qw->used_pct, reading);
     }
