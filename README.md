@@ -5,6 +5,18 @@ Antigravity. The GTK dashboard shows provider quota, reset times, projected
 usage at reset, and tokens recorded today. The Models, Daily, and Sessions tabs
 show the underlying usage breakdowns.
 
+## Screenshots
+
+Native GTK dashboard with sample data.
+
+![Dark dashboard showing provider quota and today's token usage](docs/img/dashboard-dark.png)
+
+Quota windows, reset times, and today's tokens in the dark theme.
+
+![Light dashboard showing usage charts and expanded provider details](docs/img/dashboard-light.png)
+
+Token composition, daily usage, and expanded provider details in the light theme.
+
 ## Build and run
 
 Install Pixi and the following system dependencies. Package names vary by
@@ -18,8 +30,9 @@ pixi run gui
 ```
 
 To install the dashboard, CLI, desktop launcher, and icons under `~/.local`,
-run `pixi run install`. The desktop launcher expects `~/.local/bin` on your
-desktop session's PATH. You can also run `~/.local/bin/ai-usage-gtk` directly.
+run `pixi run install`, then open the AI Usage launcher entry. The generated
+launcher uses the absolute installed executable path. You can also run
+`~/.local/bin/ai-usage-gtk` directly.
 
 ## CLI and tests
 
