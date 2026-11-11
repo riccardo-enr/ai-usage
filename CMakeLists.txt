@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ai_usage VERSION 0.1.4 LANGUAGES C)
+project(ai_usage VERSION 0.2.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -32,4 +32,14 @@ install(FILES assets/com.riccardo.AiUsage.svg DESTINATION share/icons/hicolor/sc
 install(FILES assets/com.riccardo.AiUsage.png DESTINATION share/icons/hicolor/512x512/apps)
 install(FILES assets/com.riccardo.AiUsage.png DESTINATION share/icons/hicolor/256x256/apps)
 install(FILES assets/com.riccardo.AiUsage.png DESTINATION share/pixmaps)
-install(FILES assets/com.riccardo.AiUsage.desktop DESTINATION share/applications)
+set(desktop_install_code [=[
+    set(AI_USAGE_EXECUTABLE "${CMAKE_INSTALL_PREFIX}/bin/ai-usage-gtk")
+    configure_file(
+        "@CMAKE_CURRENT_SOURCE_DIR@/assets/com.riccardo.AiUsage.desktop.in"
+        "@CMAKE_CURRENT_BINARY_DIR@/com.riccardo.AiUsage.desktop"
+        @ONLY
+    )
+]=])
+string(CONFIGURE "${desktop_install_code}" desktop_install_code @ONLY)
+install(CODE "${desktop_install_code}")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/com.riccardo.AiUsage.desktop" DESTINATION share/applications)
