@@ -591,6 +591,9 @@ static void claude_live_quota(ai_provider_usage_t *pu) {
                                                    jobj_get_double(usage, "five_hour_reset", &q->reset_epoch);
                                     q->has_updated = has_upd;
                                     q->updated_epoch = upd;
+                                    if (jobj_get_double(usage, "five_hour_updated_at", &q->updated_epoch)) {
+                                        q->has_updated = true;
+                                    }
                                 }
                                 double pct7 = 0.0;
                                 if (jobj_get_double(usage, "seven_day_pct", &pct7)) {
@@ -601,6 +604,9 @@ static void claude_live_quota(ai_provider_usage_t *pu) {
                                     q->has_reset = jobj_get_double(usage, "seven_day_reset", &q->reset_epoch);
                                     q->has_updated = has_upd;
                                     q->updated_epoch = upd;
+                                    if (jobj_get_double(usage, "seven_day_updated_at", &q->updated_epoch)) {
+                                        q->has_updated = true;
+                                    }
                                 }
                                 if (pu->n_quotas > 0) {
                                     char mix[64] = "";
