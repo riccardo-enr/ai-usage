@@ -6,9 +6,7 @@
 #include <string.h>
 #include <time.h>
 
-static void ascii_bar(
-  double used_pct, bool has_el, double elapsed_pct, int width, char * out, size_t cap)
-{
+static void ascii_bar(double used_pct, bool has_el, double elapsed_pct, int width, char *out, size_t cap) {
   if (cap < (size_t)(width + 3)) return;
   int fill = (int)lround((used_pct / 100.0) * (double)width);
   if (fill < 0) fill = 0;
@@ -28,8 +26,8 @@ static void ascii_bar(
 }
 
 static void print_table(
-  int n_cols, const char ** headers, const bool * right_align, int n_rows, char * (*cells)[9])
-{
+    int n_cols, const char **headers, const bool *right_align, int n_rows, char *(*cells)[9]
+) {
   size_t widths[9] = {0};
   for (int c = 0; c < n_cols; ++c) {
     widths[c] = strlen(headers[c]);
@@ -43,10 +41,8 @@ static void print_table(
 
   for (int c = 0; c < n_cols; ++c) {
     if (c > 0) printf("  ");
-    if (right_align[c])
-      printf("%*s", (int)widths[c], headers[c]);
-    else
-      printf("%-*s", (int)widths[c], headers[c]);
+    if (right_align[c]) printf("%*s", (int)widths[c], headers[c]);
+    else printf("%-*s", (int)widths[c], headers[c]);
   }
   printf("\n");
 
@@ -58,26 +54,22 @@ static void print_table(
 
   for (int r = 0; r < n_rows; ++r) {
     for (int c = 0; c < n_cols; ++c) {
-      const char * val = cells[r][c] ? cells[r][c] : "";
+      const char *val = cells[r][c] ? cells[r][c] : "";
       if (c > 0) printf("  ");
-      if (right_align[c])
-        printf("%*s", (int)widths[c], val);
-      else
-        printf("%-*s", (int)widths[c], val);
+      if (right_align[c]) printf("%*s", (int)widths[c], val);
+      else printf("%-*s", (int)widths[c], val);
     }
     printf("\n");
   }
 }
 
-static void render_report(const ai_usage_report_t * rep, bool show_models, bool show_daily,
-  bool show_sessions)
-{
+static void render_report(
+    const ai_usage_report_t *rep, bool show_models, bool show_daily, bool show_sessions
+) {
   double now = rep->generated_at;
   char win_str[32];
-  if (rep->days > 0)
-    snprintf(win_str, sizeof(win_str), "last %dd", rep->days);
-  else
-    snprintf(win_str, sizeof(win_str), "all time");
+  if (rep->days > 0) snprintf(win_str, sizeof(win_str), "last %dd", rep->days);
+  else snprintf(win_str, sizeof(win_str), "all time");
 
   time_t sec = (time_t)now;
   struct tm tm_val;
@@ -88,15 +80,14 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
   printf("=== AI Usage Report (%s, as of %s) ===\n\n", win_str, ts_str);
 
   printf("-- Quota / Rate Limits --\n");
-  const char * q_hdr[6] = {
-    "Provider", "Win", "Usage (| = time elapsed)", "Resets In", "Proj", "Source"};
+  const char *q_hdr[6] = {"Provider", "Win", "Usage (| = time elapsed)", "Resets In", "Proj", "Source"};
   const bool q_align[6] = {false, false, false, true, true, false};
   char q_buf[12][6][64];
-  char * q_cells[12][9];
+  char *q_cells[12][9];
   int n_qrows = 0;
 
   for (int i = 0; i < rep->n_providers; ++i) {
-    const ai_provider_usage_t * pu = &rep->providers[i];
+    const ai_provider_usage_t *pu = &rep->providers[i];
     if (pu->n_quotas == 0) {
       snprintf(q_buf[n_qrows][0], 64, "%s", pu->provider);
       snprintf(q_buf[n_qrows][1], 64, "-");
@@ -119,10 +110,8 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
       snprintf(q_buf[n_qrows][0], 64, "%s", pu->provider);
       snprintf(q_buf[n_qrows][1], 64, "%s", qw.label);
       snprintf(q_buf[n_qrows][2], 64, "%s %5.1f%%", bar, qw.used_pct);
-      if (qw.has_reset)
-        ai_fmt_duration(qw.reset_epoch - now, q_buf[n_qrows][3], 64);
-      else
-        snprintf(q_buf[n_qrows][3], 64, "-");
+      if (qw.has_reset) ai_fmt_duration(qw.reset_epoch - now, q_buf[n_qrows][3], 64);
+      else snprintf(q_buf[n_qrows][3], 64, "-");
       if (has_proj) {
         snprintf(q_buf[n_qrows][4], 64, "~%.0f%%", proj);
       } else {
@@ -136,18 +125,19 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
   print_table(6, q_hdr, q_align, n_qrows, q_cells);
 
   printf("\n-- Token Usage (%s) --\n", win_str);
-  const char * p_hdr[9] = {"Provider", "Sess", "Turns", "Input", "CacheRead", "CacheWrite",
-    "Output", "Reasoning", "Total"};
+  const char *p_hdr[9] = {
+      "Provider", "Sess", "Turns", "Input", "CacheRead", "CacheWrite", "Output", "Reasoning", "Total"
+  };
   const bool p_align[9] = {false, true, true, true, true, true, true, true, true};
   char p_buf[5][9][32];
-  char * p_cells[5][9];
+  char *p_cells[5][9];
   int n_prows = 0;
   ai_token_stats_t grand = {0};
   int total_sess = 0;
 
   for (int i = 0; i < rep->n_providers; ++i) {
-    const ai_provider_usage_t * pu = &rep->providers[i];
-    const ai_token_stats_t * t = &pu->totals;
+    const ai_provider_usage_t *pu = &rep->providers[i];
+    const ai_token_stats_t *t = &pu->totals;
     ai_token_stats_add(&grand, t);
     total_sess += pu->sessions_count;
     snprintf(p_buf[n_prows][0], 32, "%s", pu->provider);
@@ -179,12 +169,12 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
 
   if (show_models) {
     char m_buf[64][7][64];
-    char * m_cells[64][9];
+    char *m_cells[64][9];
     int n_mrows = 0;
     for (int i = 0; i < rep->n_providers; ++i) {
-      const ai_provider_usage_t * pu = &rep->providers[i];
+      const ai_provider_usage_t *pu = &rep->providers[i];
       for (int m = 0; m < pu->n_models && n_mrows < 64; ++m) {
-        const ai_token_stats_t * st = &pu->by_model[m].stats;
+        const ai_token_stats_t *st = &pu->by_model[m].stats;
         snprintf(m_buf[n_mrows][0], 64, "%s", pu->provider);
         snprintf(m_buf[n_mrows][1], 64, "%.63s", pu->by_model[m].key);
         snprintf(m_buf[n_mrows][2], 64, "%lld", (long long)st->turns);
@@ -198,8 +188,7 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
     }
     if (n_mrows > 0) {
       printf("\n-- By Model --\n");
-      const char * m_hdr[7] = {
-        "Provider", "Model", "Turns", "Input", "CacheRead", "Out+Reas", "Total"};
+      const char *m_hdr[7] = {"Provider", "Model", "Turns", "Input", "CacheRead", "Out+Reas", "Total"};
       const bool m_align[7] = {false, false, true, true, true, true, true};
       print_table(7, m_hdr, m_align, n_mrows, m_cells);
     }
@@ -207,12 +196,12 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
 
   if (show_daily) {
     char d_buf[64][7][64];
-    char * d_cells[64][9];
+    char *d_cells[64][9];
     int n_drows = 0;
     for (int i = 0; i < rep->n_providers; ++i) {
-      const ai_provider_usage_t * pu = &rep->providers[i];
+      const ai_provider_usage_t *pu = &rep->providers[i];
       for (int d = 0; d < pu->n_days && n_drows < 64; ++d) {
-        const ai_token_stats_t * st = &pu->by_day[d].stats;
+        const ai_token_stats_t *st = &pu->by_day[d].stats;
         snprintf(d_buf[n_drows][0], 64, "%.63s", pu->by_day[d].key);
         snprintf(d_buf[n_drows][1], 64, "%s", pu->provider);
         snprintf(d_buf[n_drows][2], 64, "%lld", (long long)st->turns);
@@ -226,8 +215,7 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
     }
     if (n_drows > 0) {
       printf("\n-- Daily Breakdown --\n");
-      const char * d_hdr[7] = {
-        "Date", "Provider", "Turns", "Input", "CacheRead", "Out+Reas", "Total"};
+      const char *d_hdr[7] = {"Date", "Provider", "Turns", "Input", "CacheRead", "Out+Reas", "Total"};
       const bool d_align[7] = {false, false, true, true, true, true, true};
       print_table(7, d_hdr, d_align, n_drows, d_cells);
     }
@@ -235,13 +223,13 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
 
   if (show_sessions) {
     char s_buf[45][6][64];
-    char * s_cells[45][9];
+    char *s_cells[45][9];
     int n_srows = 0;
     for (int i = 0; i < rep->n_providers; ++i) {
-      const ai_provider_usage_t * pu = &rep->providers[i];
+      const ai_provider_usage_t *pu = &rep->providers[i];
       int lim = pu->n_sessions < 15 ? pu->n_sessions : 15;
       for (int s = 0; s < lim && n_srows < 45; ++s) {
-        const ai_session_info_t * si = &pu->sessions[s];
+        const ai_session_info_t *si = &pu->sessions[s];
         time_t s_sec = (time_t)si->updated_epoch;
         struct tm s_tm;
         localtime_r(&s_sec, &s_tm);
@@ -250,7 +238,7 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
         snprintf(s_buf[n_srows][2], 64, "%.22s", si->model);
         snprintf(s_buf[n_srows][3], 64, "%lld", (long long)si->turns);
         ai_fmt_tokens(si->total_tokens, s_buf[n_srows][4], 64);
-        const char * loc = si->title[0] ? si->title : si->cwd;
+        const char *loc = si->title[0] ? si->title : si->cwd;
         if (!loc || !*loc) loc = si->session_id;
         snprintf(s_buf[n_srows][5], 64, "%.36s", loc);
         for (int c = 0; c < 6; ++c) s_cells[n_srows][c] = s_buf[n_srows][c];
@@ -259,15 +247,14 @@ static void render_report(const ai_usage_report_t * rep, bool show_models, bool 
     }
     if (n_srows > 0) {
       printf("\n-- Recent Sessions --\n");
-      const char * s_hdr[6] = {"Updated", "Provider", "Model", "Turns", "Total", "Session / CWD"};
+      const char *s_hdr[6] = {"Updated", "Provider", "Model", "Turns", "Total", "Session / CWD"};
       const bool s_align[6] = {false, false, false, true, true, false};
       print_table(6, s_hdr, s_align, n_srows, s_cells);
     }
   }
 }
 
-int main(int argc, char ** argv)
-{
+int main(int argc, char **argv) {
   int days = 7;
   bool all = false;
   bool show_models = false;
@@ -290,19 +277,16 @@ int main(int argc, char ** argv)
     } else if (strcmp(argv[i], "--json") == 0) {
       emit_json = true;
     } else if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
-      const char * p = argv[++i];
-      if (strcmp(p, "claude") == 0)
-        mask |= AI_PROVIDER_CLAUDE;
-      else if (strcmp(p, "codex") == 0)
-        mask |= AI_PROVIDER_CODEX;
-      else if (strcmp(p, "antigravity") == 0)
-        mask |= AI_PROVIDER_ANTIGRAVITY;
-      else if (strcmp(p, "opencode") == 0)
-        mask |= AI_PROVIDER_OPENCODE;
+      const char *p = argv[++i];
+      if (strcmp(p, "claude") == 0) mask |= AI_PROVIDER_CLAUDE;
+      else if (strcmp(p, "codex") == 0) mask |= AI_PROVIDER_CODEX;
+      else if (strcmp(p, "antigravity") == 0) mask |= AI_PROVIDER_ANTIGRAVITY;
+      else if (strcmp(p, "opencode") == 0) mask |= AI_PROVIDER_OPENCODE;
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       printf(
-        "Usage: ai-usage [--days N] [--all] [--provider claude|codex|antigravity|opencode] "
-        "[--models] [--daily] [--sessions] [--json]\n");
+          "Usage: ai-usage [--days N] [--all] [--provider claude|codex|antigravity|opencode] "
+          "[--models] [--daily] [--sessions] [--json]\n"
+      );
       return 0;
     }
   }
@@ -312,7 +296,7 @@ int main(int argc, char ** argv)
   ai_usage_report_t rep;
   ai_usage_collect(&rep, eff_days, mask, 0.0, NULL, NULL, NULL, NULL);
   if (emit_json) {
-    char * j = ai_usage_report_to_json(&rep);
+    char *j = ai_usage_report_to_json(&rep);
     if (j) {
       puts(j);
       ai_usage_free_string(j);
