@@ -1343,6 +1343,255 @@ static void collect_antigravity(
     );
 }
 
+#define OPENCODE_GO_LIMIT_5H_USD 12.0
+#define OPENCODE_GO_LIMIT_7D_USD 30.0
+
+typedef struct {
+    char model[96];
+    double usd_per_mtok[4];
+} go_price_t;
+
+static char *read_whole_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = n > 0 ? malloc((size_t)n + 1) : NULL;
+    if (buf && fread(buf, 1, (size_t)n, f) == (size_t)n) buf[n] = '\0';
+    else { free(buf); buf = NULL; }
+    fclose(f);
+    return buf;
+}
+
+static void go_price_lookup(sqlite3 *db, const char *models_json, const char *model, double out[4]) {
+    static const char *fields[4] = {"input", "output", "cache_read", "cache_write"};
+    for (int i = 0; i < 4; ++i) out[i] = 0.0;
+    if (!models_json || !model || !*model) return;
+    for (int i = 0; i < 4; ++i) {
+        char path[192];
+        snprintf(path, sizeof(path), "$.\"opencode-go\".models.\"%s\".cost.%s", model, fields[i]);
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, "SELECT json_extract(?1, ?2)", -1, &stmt, NULL) != SQLITE_OK) return;
+        sqlite3_bind_text(stmt, 1, models_json, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, path, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) out[i] = sqlite3_column_double(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+}
+
+static void collect_opencode(
+    ai_provider_usage_t *pu,
+    const char *base_dir,
+    double cutoff_epoch,
+    double now_epoch
+) {
+    snprintf(pu->provider, sizeof(pu->provider), "opencode");
+    snprintf(pu->quota_note, sizeof(pu->quota_note), "no quota (BYO providers)");
+
+    char db_path[1024];
+    snprintf(db_path, sizeof(db_path), "%s/opencode.db", base_dir);
+    struct stat st;
+    if (stat(db_path, &st) != 0 || !S_ISREG(st.st_mode)) return;
+    sqlite3 *db = open_sqlite_ro(db_path);
+    if (!db) return;
+
+    sqlite3_stmt *stmt = NULL;
+    bool is_v2 = false;
+    const char *check_sql =
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_message'";
+    if (sqlite3_prepare_v2(db, check_sql, -1, &stmt, NULL) == SQLITE_OK) {
+        is_v2 = sqlite3_step(stmt) == SQLITE_ROW;
+        sqlite3_finalize(stmt);
+    }
+
+    int64_t tok_5h = 0, turns_5h = 0;
+    int64_t tok_7d = 0, turns_7d = 0;
+    double usd_5h = 0.0, usd_7d = 0.0;
+    double oldest_5h = 0.0, oldest_7d = 0.0;
+    bool has_go = false;
+    char models_path[1024];
+    const char *xdg_cache = getenv("XDG_CACHE_HOME");
+    const char *home_dir = getenv("HOME");
+    if (xdg_cache && *xdg_cache) snprintf(models_path, sizeof(models_path), "%s/opencode/models.json", xdg_cache);
+    else snprintf(models_path, sizeof(models_path), "%s/.cache/opencode/models.json", home_dir ? home_dir : "");
+    char *models_json = read_whole_file(models_path);
+    go_price_t prices[16];
+    int n_prices = 0;
+    double cut_5h = now_epoch - 5.0 * 3600.0;
+    double cut_7d = now_epoch - 7.0 * 86400.0;
+    double scan_cutoff = cutoff_epoch;
+    if (is_v2 && scan_cutoff > 0.0 && cut_7d < scan_cutoff) scan_cutoff = cut_7d;
+
+    stmt = NULL;
+    const char *sql;
+    if (is_v2) {
+        sql =
+            "SELECT session_id,"
+            " json_extract(data,'$.time.created'),"
+            " json_extract(data,'$.model.providerID'),"
+            " json_extract(data,'$.model.id'),"
+            " json_extract(data,'$.tokens.input'),"
+            " json_extract(data,'$.tokens.cache.read'),"
+            " json_extract(data,'$.tokens.cache.write'),"
+            " json_extract(data,'$.tokens.output'),"
+            " json_extract(data,'$.tokens.reasoning'),"
+            " time_created"
+            " FROM session_message WHERE type='assistant'";
+    } else {
+        sql =
+            "SELECT session_id,"
+            " json_extract(data,'$.time.created'),"
+            " json_extract(data,'$.providerID'),"
+            " json_extract(data,'$.modelID'),"
+            " json_extract(data,'$.tokens.input'),"
+            " json_extract(data,'$.tokens.cache.read'),"
+            " json_extract(data,'$.tokens.cache.write'),"
+            " json_extract(data,'$.tokens.output'),"
+            " json_extract(data,'$.tokens.reasoning'),"
+            " time_created"
+            " FROM message WHERE json_extract(data,'$.role')='assistant'";
+    }
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *prov = (const char *)sqlite3_column_text(stmt, 2);
+            bool is_go = is_v2 && prov && strcmp(prov, "opencode-go") == 0;
+            if (is_go) has_go = true;
+
+            const char *sid = (const char *)sqlite3_column_text(stmt, 0);
+            if (!sid || !*sid) continue;
+            long long ts_raw = sqlite3_column_int64(stmt, 1);
+            if (ts_raw <= 0) ts_raw = sqlite3_column_int64(stmt, 9);
+            double ts = (double)ts_raw;
+            if (ts > 1e11) ts /= 1000.0;
+            if (is_v2 && scan_cutoff > 0.0 && ts < scan_cutoff) continue;
+            if (!is_v2 && cutoff_epoch > 0.0 && ts < cutoff_epoch) continue;
+
+            const char *mid = (const char *)sqlite3_column_text(stmt, 3);
+            int64_t inp = sqlite3_column_int64(stmt, 4);
+            int64_t cache_r = sqlite3_column_int64(stmt, 5);
+            int64_t cache_w = sqlite3_column_int64(stmt, 6);
+            int64_t out = sqlite3_column_int64(stmt, 7);
+            int64_t reas = sqlite3_column_int64(stmt, 8);
+            if (is_go) {
+                int64_t turn_tok =
+                    (inp > 0 ? inp : 0) + (cache_r > 0 ? cache_r : 0) +
+                    (cache_w > 0 ? cache_w : 0) + (out > 0 ? out : 0) +
+                    (reas > 0 ? reas : 0);
+                double usd = 0.0;
+                if (ts >= cut_7d && mid && *mid) {
+                    int pi = 0;
+                    while (pi < n_prices && strcmp(prices[pi].model, mid) != 0) ++pi;
+                    if (pi == n_prices && n_prices < 16) {
+                        snprintf(prices[pi].model, sizeof(prices[pi].model), "%s", mid);
+                        go_price_lookup(db, models_json, mid, prices[pi].usd_per_mtok);
+                        ++n_prices;
+                    }
+                    if (pi < n_prices) {
+                        const double *pr = prices[pi].usd_per_mtok;
+                        usd = ((double)(inp > 0 ? inp : 0) * pr[0] + (double)((out > 0 ? out : 0) + (reas > 0 ? reas : 0)) * pr[1] +
+                               (double)(cache_r > 0 ? cache_r : 0) * pr[2] + (double)(cache_w > 0 ? cache_w : 0) * pr[3]) / 1e6;
+                    }
+                }
+                if (ts >= cut_5h) {
+                    tok_5h += turn_tok;
+                    turns_5h += 1;
+                    usd_5h += usd;
+                    if (oldest_5h == 0.0 || ts < oldest_5h) oldest_5h = ts;
+                }
+                if (ts >= cut_7d) {
+                    tok_7d += turn_tok;
+                    turns_7d += 1;
+                    usd_7d += usd;
+                    if (oldest_7d == 0.0 || ts < oldest_7d) oldest_7d = ts;
+                }
+            }
+            if (inp == 0 && cache_r == 0 && cache_w == 0 && out == 0 && reas == 0) continue;
+            if (is_v2 && cutoff_epoch > 0.0 && ts < cutoff_epoch) continue;
+
+            char mkey[128];
+            if (prov && *prov && mid && *mid) snprintf(mkey, sizeof(mkey), "%s/%s", prov, mid);
+            else if (mid && *mid) snprintf(mkey, sizeof(mkey), "%s", mid);
+            else if (prov && *prov) snprintf(mkey, sizeof(mkey), "%s", prov);
+            else snprintf(mkey, sizeof(mkey), "unknown");
+
+            int64_t tok = record_turn(pu, ts, mkey, inp, cache_r, cache_w, out, reas);
+            ai_session_info_t *s = session_get_or_add(pu, sid);
+            if (s) {
+                if (s->turns == 0) {
+                    s->updated_epoch = ts;
+                    snprintf(s->model, sizeof(s->model), "%s", mkey);
+                    s->turns = 1;
+                    s->total_tokens = tok;
+                } else {
+                    s->turns += 1;
+                    s->total_tokens += tok;
+                    if (ts >= s->updated_epoch) {
+                        s->updated_epoch = ts;
+                        snprintf(s->model, sizeof(s->model), "%s", mkey);
+                    }
+                }
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    stmt = NULL;
+    const char *ssql = is_v2
+        ? "SELECT id, title, directory, time_updated FROM session_v2"
+        : "SELECT id, title, directory, time_updated FROM session";
+    if (sqlite3_prepare_v2(db, ssql, -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *sid = (const char *)sqlite3_column_text(stmt, 0);
+            if (!sid || !*sid) continue;
+            for (int i = 0; i < pu->n_sessions; ++i) {
+                if (strcmp(pu->sessions[i].session_id, sid) != 0) continue;
+                ai_session_info_t *s = &pu->sessions[i];
+                const char *title = (const char *)sqlite3_column_text(stmt, 1);
+                const char *dir = (const char *)sqlite3_column_text(stmt, 2);
+                if (title && *title) snprintf(s->title, sizeof(s->title), "%s", title);
+                if (dir && *dir) snprintf(s->cwd, sizeof(s->cwd), "%s", dir);
+                if (s->updated_epoch <= 0.0) {
+                    double upd = (double)sqlite3_column_int64(stmt, 3);
+                    if (upd > 1e11) upd /= 1000.0;
+                    s->updated_epoch = upd;
+                }
+                break;
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+    free(models_json);
+    pu->sessions_count = pu->n_sessions;
+
+    if (is_v2 && has_go) {
+        const double usd[2] = {usd_5h, usd_7d};
+        const double limit_usd[2] = {OPENCODE_GO_LIMIT_5H_USD, OPENCODE_GO_LIMIT_7D_USD};
+        const char *labels[2] = {"5h", "7d"};
+        const int seconds[2] = {5 * 3600, 7 * 86400};
+        const int64_t tokens[2] = {tok_5h, tok_7d};
+        const int64_t turns[2] = {turns_5h, turns_7d};
+        const double oldest[2] = {oldest_5h, oldest_7d};
+        for (int w = 0; w < 2; ++w) {
+            ai_quota_window_t *q = &pu->quotas[pu->n_quotas++];
+            memset(q, 0, sizeof(*q));
+            snprintf(q->label, sizeof(q->label), "%s", labels[w]);
+            q->window_seconds = seconds[w];
+            q->used_pct = usd[w] / limit_usd[w] * 100.0;
+            q->window_tokens = tokens[w];
+            q->window_turns = turns[w];
+            q->has_reset = true;
+            q->reset_epoch = oldest[w] > 0.0
+                ? oldest[w] + seconds[w]
+                : now_epoch + seconds[w];
+            q->has_updated = true;
+            q->updated_epoch = now_epoch;
+        }
+        snprintf(pu->quota_note, sizeof(pu->quota_note), "est. from tokens ($12/5h, $30/wk)");
+    }
+}
+
 static int cmp_session_desc(const void *a, const void *b) {
     const ai_session_info_t *sa = (const ai_session_info_t *)a;
     const ai_session_info_t *sb = (const ai_session_info_t *)b;
@@ -1374,7 +1623,8 @@ void ai_usage_collect(
     double now_override,
     const char *claude_dir,
     const char *codex_dir,
-    const char *gemini_dir
+    const char *gemini_dir,
+    const char *opencode_dir
 ) {
     memset(out, 0, sizeof(*out));
     double cur_now = now_override > 0.0 ? now_override : (double)time(NULL);
@@ -1384,10 +1634,16 @@ void ai_usage_collect(
 
     const char *home = getenv("HOME");
     if (!home) home = "";
-    char def_claude[512], def_codex[512], def_gemini[512];
+    char def_claude[512], def_codex[512], def_gemini[512], def_opencode[512];
     snprintf(def_claude, sizeof(def_claude), "%s/.claude", home);
     snprintf(def_codex, sizeof(def_codex), "%s/.codex", home);
     snprintf(def_gemini, sizeof(def_gemini), "%s/.gemini", home);
+    const char *xdg_data = getenv("XDG_DATA_HOME");
+    if (xdg_data && *xdg_data) {
+        snprintf(def_opencode, sizeof(def_opencode), "%s/opencode", xdg_data);
+    } else {
+        snprintf(def_opencode, sizeof(def_opencode), "%s/.local/share/opencode", home);
+    }
 
     if (provider_mask & AI_PROVIDER_CLAUDE) {
         collect_claude(
@@ -1407,6 +1663,14 @@ void ai_usage_collect(
         collect_antigravity(
             &out->providers[out->n_providers++],
             (gemini_dir && *gemini_dir) ? gemini_dir : def_gemini,
+            cutoff,
+            cur_now
+        );
+    }
+    if (provider_mask & AI_PROVIDER_OPENCODE) {
+        collect_opencode(
+            &out->providers[out->n_providers++],
+            (opencode_dir && *opencode_dir) ? opencode_dir : def_opencode,
             cutoff,
             cur_now
         );
@@ -1525,10 +1789,13 @@ char *ai_usage_collect_json(
     double now_override,
     const char *claude_dir,
     const char *codex_dir,
-    const char *gemini_dir
+    const char *gemini_dir,
+    const char *opencode_dir
 ) {
     ai_usage_report_t rep;
-    ai_usage_collect(&rep, days, provider_mask, now_override, claude_dir, codex_dir, gemini_dir);
+    ai_usage_collect(
+        &rep, days, provider_mask, now_override, claude_dir, codex_dir, gemini_dir, opencode_dir
+    );
     char *json = ai_usage_report_to_json(&rep);
     ai_usage_report_free(&rep);
     return json;

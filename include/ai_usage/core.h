@@ -13,7 +13,8 @@ enum {
     AI_PROVIDER_CLAUDE      = 1 << 0,
     AI_PROVIDER_CODEX       = 1 << 1,
     AI_PROVIDER_ANTIGRAVITY = 1 << 2,
-    AI_PROVIDER_ALL         = AI_PROVIDER_CLAUDE | AI_PROVIDER_CODEX | AI_PROVIDER_ANTIGRAVITY
+    AI_PROVIDER_OPENCODE    = 1 << 3,
+    AI_PROVIDER_ALL         = AI_PROVIDER_CLAUDE | AI_PROVIDER_CODEX | AI_PROVIDER_ANTIGRAVITY | AI_PROVIDER_OPENCODE
 };
 
 typedef struct {
@@ -81,7 +82,7 @@ typedef struct {
 typedef struct {
     double generated_at;
     int days;
-    ai_provider_usage_t providers[3];
+    ai_provider_usage_t providers[4];
     int n_providers;
 } ai_usage_report_t;
 
@@ -103,7 +104,8 @@ void ai_usage_collect(
     double now_override,
     const char *claude_dir,
     const char *codex_dir,
-    const char *gemini_dir
+    const char *gemini_dir,
+    const char *opencode_dir
 );
 
 void ai_usage_report_free(ai_usage_report_t *r);
@@ -116,7 +118,8 @@ char *ai_usage_collect_json(
     double now_override,
     const char *claude_dir,
     const char *codex_dir,
-    const char *gemini_dir
+    const char *gemini_dir,
+    const char *opencode_dir
 );
 
 void ai_usage_free_string(char *s);
