@@ -3,3 +3,4 @@
 /.pixi/
 /compile_commands.json
 /.claude/
+.artifacts/
