@@ -1,7 +1,7 @@
 # AI Usage
 
-AI Usage is a Linux desktop dashboard, terminal dashboard, and CLI for Claude Code, Codex, and
-Antigravity. The GTK dashboard shows provider quota, reset times, projected
+AI Usage is a Linux desktop dashboard, terminal dashboard, and CLI for Claude Code and Codex.
+The GTK dashboard shows provider quota, reset times, projected
 usage at reset, and tokens recorded today. The Models, Daily, and Sessions tabs
 show the underlying usage breakdowns.
 
@@ -46,6 +46,24 @@ launcher uses the absolute installed executable path. You can also run
 | `pixi run json` | Machine-readable report |
 | `pixi run test` | Build and run core and terminal tests |
 
+## Config
+
+Optional file `$XDG_CONFIG_HOME/ai-usage/config.yaml` (fallback
+`~/.config/ai-usage/config.yaml`), or `--config PATH` on `ai-usage` and
+`ai-usage-tui`. All keys are optional; a missing file means defaults.
+
+```yaml
+providers:
+  claude: {enabled: true, dir: ~/.claude}
+  codex:  {enabled: true, dir: ~/.codex}
+days: 7
+```
+
+Flags (`--provider`, `--days`, `--all`) override the file. A disabled provider
+is skipped unless named with `--provider`. Unknown keys warn on stderr. A
+malformed file exits 1 with `config: <path>:<line>: <why>` (the GTK app logs it
+and uses defaults). Needs libyaml (`yaml-0.1`) to build.
+
 ## Terminal dashboard
 
 Run `pixi run tui` in an interactive terminal, or run the installed
@@ -55,7 +73,6 @@ Cards sit side by side at 120 columns and above, and stack in narrower terminals
 The Catppuccin Mocha palette uses muted borders with peach, blue, and green
 provider accents; projections above 100% use soft rose text. The vertical bar
 marker shows elapsed window time. Custom terminal colors are restored on exit.
-Antigravity local rolling windows show tokens and turns rather than quota percentages.
 Models and Daily show token breakdowns;
 Sessions shows recorded sessions. Below 135 columns, token tables show turns,
 total, input, and combined output plus reasoning; wider terminals also show
@@ -69,13 +86,13 @@ use ASCII borders and bars, and terminals without color use monochrome styling.
 | `1` - `4`, `Tab` | Select Overview, Models, Daily, or Sessions |
 | `j` / `k`, down / up | Scroll one row |
 | `PageDown` / `PageUp`, `Home` / `End` | Scroll by page or jump to either end |
-| `p` | Cycle all, Claude, Codex, and Antigravity |
+| `p` | Cycle all, Claude and Codex |
 | `d` | Cycle 1, 7, 30 days, and all time |
 | `r` | Refresh usage |
 | `q` | Quit |
 
 The default is seven days, all providers, and automatic refresh every 60 seconds.
-Options are `--days N`, `--all`, `--provider all|claude|codex|antigravity`,
+Options are `--days N`, `--all`, `--provider all|claude|codex`,
 and `--refresh SECONDS` (`0` disables automatic refresh). `--help` lists the
 options and controls. Provider filtering uses the collected report immediately;
 changing days collects a new report. The previous report stays visible during
@@ -94,8 +111,6 @@ the terminal is restored before waiting for any running collection to finish.
   `~/.claude/usage-history.jsonl` are used when a live window is unavailable.
 - Codex quota comes from local session logs and refreshes when Codex records a
   new quota snapshot.
-- Antigravity provider quota comes from its CLI when available. The dashboard
-  labels local rolling usage separately.
 
 The pace estimate extrapolates the average usage rate in the current quota
 window. A projection over 100% means that pace would exhaust quota before reset.

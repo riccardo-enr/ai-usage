@@ -1,3 +1,4 @@
+#include "ai_usage/config.h"
 #include "ai_usage/core.h"
 
 #include <adwaita.h>
@@ -43,8 +44,6 @@ static const char *APP_CSS = ".card-box {\n"
                              "}\n"
                              ".provider-dot.claude { background-color: #e17a4d; }\n"
                              ".provider-dot.codex { background-color: #429eeb; }\n"
-                             ".provider-dot.antigravity { background-color: #47c28a; }\n"
-                             ".provider-dot.opencode { background-color: #9e73d9; }\n"
                              ".filter-toolbar {\n"
                              "    padding: 8px 20px 12px;\n"
                              "}\n"
@@ -54,6 +53,8 @@ static const char *APP_CSS = ".card-box {\n"
                              "    margin-top: 12px;\n"
                              "    margin-bottom: 2px;\n"
                              "}\n";
+
+static ai_config_t cfg;
 
 typedef struct {
   double used_pct;
@@ -83,8 +84,6 @@ typedef struct {
   char day[16];
   int64_t claude_tok;
   int64_t codex_tok;
-  int64_t agy_tok;
-  int64_t oc_tok;
   int64_t turns;
 } daily_bar_t;
 
@@ -112,8 +111,6 @@ typedef struct {
   int days;
   int mask;
   ai_usage_report_t report;
-  ai_grouped_quota_t *antigravity_quotas;
-  size_t n_antigravity_quotas;
   double elapsed_ms;
 } worker_ctx_t;
 
@@ -122,26 +119,16 @@ static void provider_color(const char *prov, double *r, double *g, double *b) {
     *r = 0.88;
     *g = 0.48;
     *b = 0.30; /* warm coral/orange */
-  } else if (strcmp(prov, "codex") == 0) {
+  } else {
     *r = 0.26;
     *g = 0.62;
     *b = 0.92; /* sky blue */
-  } else if (strcmp(prov, "antigravity") == 0) {
-    *r = 0.28;
-    *g = 0.76;
-    *b = 0.54; /* emerald green */
-  } else {
-    *r = 0.62;
-    *g = 0.45;
-    *b = 0.85; /* violet */
   }
 }
 
 static const char *provider_name(const char *provider) {
   if (strcmp(provider, "claude") == 0) return "Claude";
   if (strcmp(provider, "codex") == 0) return "Codex";
-  if (strcmp(provider, "antigravity") == 0) return "Antigravity";
-  if (strcmp(provider, "opencode") == 0) return "OpenCode";
   return provider;
 }
 
@@ -293,10 +280,10 @@ static void draw_hbar_chart(GtkDrawingArea *area, cairo_t *cr, int width, int he
     }
     top_y = 26.0;
   } else {
-    const char *p_names[4] = {"claude", "codex", "antigravity", "opencode"};
+    const char *p_names[2] = {"claude", "codex"};
     double lx = 4.0;
     cairo_set_font_size(cr, 11.0);
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < 2; ++k) {
       double r, g, b;
       provider_color(p_names[k], &r, &g, &b);
       rounded_rect(cr, lx, 4.0, 10.0, 10.0, 3.0);
@@ -410,10 +397,10 @@ static void draw_daily_chart(GtkDrawingArea *area, cairo_t *cr, int width, int h
     return;
   }
 
-  const char *p_names[4] = {"claude", "codex", "antigravity", "opencode"};
+  const char *p_names[2] = {"claude", "codex"};
   double lx = 4.0;
   cairo_set_font_size(cr, 11.0);
-  for (int k = 0; k < 4; ++k) {
+  for (int k = 0; k < 2; ++k) {
     double r, g, b;
     provider_color(p_names[k], &r, &g, &b);
     rounded_rect(cr, lx, 4.0, 10.0, 10.0, 3.0);
@@ -427,7 +414,7 @@ static void draw_daily_chart(GtkDrawingArea *area, cairo_t *cr, int width, int h
 
   int64_t max_day = 1;
   for (int i = 0; i < dc->n_days; ++i) {
-    int64_t t = dc->days[i].claude_tok + dc->days[i].codex_tok + dc->days[i].agy_tok + dc->days[i].oc_tok;
+    int64_t t = dc->days[i].claude_tok + dc->days[i].codex_tok;
     if (t > max_day) max_day = t;
   }
 
@@ -466,7 +453,7 @@ static void draw_daily_chart(GtkDrawingArea *area, cairo_t *cr, int width, int h
 
   for (int i = 0; i < dc->n_days; ++i) {
     daily_bar_t *d = &dc->days[i];
-    int64_t tot = d->claude_tok + d->codex_tok + d->agy_tok + d->oc_tok;
+    int64_t tot = d->claude_tok + d->codex_tok;
     double cx = pad_l + ((double)i + 0.5) * slot_w;
     double bx = cx - bar_w / 2.0;
     double tot_h = ((double)tot / (double)max_day) * plot_h;
@@ -478,9 +465,9 @@ static void draw_daily_chart(GtkDrawingArea *area, cairo_t *cr, int width, int h
       rounded_rect(cr, bx, by_top, bar_w, tot_h, 4.0);
       cairo_clip(cr);
 
-      const int64_t vals[4] = {d->claude_tok, d->codex_tok, d->agy_tok, d->oc_tok};
+      const int64_t vals[2] = {d->claude_tok, d->codex_tok};
       double cur_bottom = pad_t + plot_h;
-      for (int p = 0; p < 4; ++p) {
+      for (int p = 0; p < 2; ++p) {
         if (vals[p] <= 0) continue;
         double sh = ((double)vals[p] / (double)tot) * tot_h;
         double r, g, b;
@@ -544,9 +531,7 @@ static GtkWidget *make_daily_chart_card(const ai_usage_report_t *rep, int height
         snprintf(dc->days[idx].day, sizeof(dc->days[idx].day), "%.15s", day_key);
       }
       if (strcmp(pu->provider, "claude") == 0) dc->days[idx].claude_tok += tok;
-      else if (strcmp(pu->provider, "codex") == 0) dc->days[idx].codex_tok += tok;
-      else if (strcmp(pu->provider, "antigravity") == 0) dc->days[idx].agy_tok += tok;
-      else dc->days[idx].oc_tok += tok;
+      else dc->days[idx].codex_tok += tok;
       dc->days[idx].turns += pu->by_day[d].stats.turns;
     }
   }
@@ -737,32 +722,12 @@ static void populate_overview(app_ui_t *ui, const worker_ctx_t *ctx) {
     gtk_widget_set_valign(card, GTK_ALIGN_FILL);
     gtk_box_append(GTK_BOX(card), provider_title(pu->provider));
 
-    bool antigravity = strcmp(pu->provider, "antigravity") == 0;
-    bool live_quotas = antigravity && ctx->n_antigravity_quotas > 0;
-    const char *source = live_quotas ? "Antigravity CLI /usage" : pu->quota_note;
+    const char *source = pu->quota_note;
     char src_txt[128];
     snprintf(src_txt, sizeof(src_txt), "source: %s", *source ? source : "-");
     gtk_box_append(GTK_BOX(card), card_label(src_txt, "metric-sub"));
 
     bool claude = strcmp(pu->provider, "claude") == 0;
-    if (live_quotas) {
-      const char *previous_group = "";
-      for (size_t q = 0; q < ctx->n_antigravity_quotas; ++q) {
-        const ai_grouped_quota_t *quota = &ctx->antigravity_quotas[q];
-        if (strcmp(previous_group, quota->group) != 0) {
-          GtkWidget *group = card_label(quota->group, "metric-title");
-          gtk_box_append(GTK_BOX(card), group);
-          previous_group = quota->group;
-        }
-        gtk_box_append(GTK_BOX(card), make_quota_row(&quota->window, now, false));
-      }
-      gtk_flow_box_append(GTK_FLOW_BOX(q_list), card);
-      continue;
-    }
-    if (antigravity) {
-      GtkWidget *empty = card_label("Provider quotas unavailable. Local usage below.", "metric-sub");
-      gtk_box_append(GTK_BOX(card), empty);
-    }
     const char *claude_labels[] = {"5h", "7d"};
     const ai_quota_window_t *claude_windows[2] = {NULL, NULL};
     if (claude) {
@@ -784,7 +749,7 @@ static void populate_overview(app_ui_t *ui, const worker_ctx_t *ctx) {
         gtk_box_append(GTK_BOX(card), empty);
         continue;
       }
-      gtk_box_append(GTK_BOX(card), make_quota_row(qw, now, antigravity || qw->is_token_window));
+      gtk_box_append(GTK_BOX(card), make_quota_row(qw, now, qw->is_token_window));
     }
     if (n_windows == 0) {
       GtkWidget *empty = card_label("No quota data available", "metric-sub");
@@ -1162,7 +1127,6 @@ static gboolean apply_report_idle(gpointer data) {
   ui->loading = false;
   if (ctx->days != ui->selected_days || ctx->mask != ui->selected_mask) {
     ai_usage_report_free(&ctx->report);
-    free(ctx->antigravity_quotas);
     g_free(ctx);
     refresh_async(ui);
     return G_SOURCE_REMOVE;
@@ -1184,43 +1148,14 @@ static gboolean apply_report_idle(gpointer data) {
   populate_sessions(ui, &ctx->report);
 
   ai_usage_report_free(&ctx->report);
-  free(ctx->antigravity_quotas);
   g_free(ctx);
   return G_SOURCE_REMOVE;
-}
-
-static void collect_antigravity_quotas(worker_ctx_t *ctx) {
-  g_autofree char *agy = g_find_program_in_path("agy");
-  if (!agy) {
-    agy = g_build_filename(g_get_home_dir(), ".local", "bin", "agy", NULL);
-    if (!g_file_test(agy, G_FILE_TEST_IS_EXECUTABLE)) return;
-  }
-
-  char *argv[] = {"timeout", "--kill-after=1s", "12s", agy, "-p", "/usage", "--output-format", "json", NULL};
-  g_autofree char *output = NULL;
-  int status;
-  if (g_spawn_sync(
-          NULL,
-          argv,
-          NULL,
-          G_SPAWN_SEARCH_PATH | G_SPAWN_STDERR_TO_DEV_NULL,
-          NULL,
-          NULL,
-          &output,
-          NULL,
-          &status,
-          NULL
-      ) &&
-      g_spawn_check_wait_status(status, NULL)) {
-    ctx->n_antigravity_quotas = ai_antigravity_parse_quotas(output, &ctx->antigravity_quotas);
-  }
 }
 
 static gpointer worker_thread_fn(gpointer data) {
   worker_ctx_t *ctx = (worker_ctx_t *)data;
   gint64 t0 = g_get_monotonic_time();
-  ai_usage_collect(&ctx->report, ctx->days, ctx->mask, 0.0, NULL, NULL, NULL, NULL);
-  if (ctx->mask & AI_PROVIDER_ANTIGRAVITY) collect_antigravity_quotas(ctx);
+  ai_usage_collect(&ctx->report, ctx->days, ctx->mask, 0.0, cfg.claude_dir, cfg.codex_dir);
   ctx->elapsed_ms = (double)(g_get_monotonic_time() - t0) / 1000.0;
   g_idle_add(apply_report_idle, ctx);
   return NULL;
@@ -1253,14 +1188,12 @@ static void on_provider_changed(GObject *dropdown, GParamSpec *pspec, gpointer u
   (void)pspec;
   app_ui_t *ui = (app_ui_t *)user_data;
   guint idx = gtk_drop_down_get_selected(GTK_DROP_DOWN(dropdown));
-  const int masks[5] = {
-      AI_PROVIDER_ALL,
+  const int masks[3] = {
+      cfg.mask,
       AI_PROVIDER_CLAUDE,
       AI_PROVIDER_CODEX,
-      AI_PROVIDER_ANTIGRAVITY,
-      AI_PROVIDER_OPENCODE,
   };
-  if (idx < 5) {
+  if (idx < 3) {
     ui->selected_mask = masks[idx];
     refresh_async(ui);
   }
@@ -1314,8 +1247,8 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
   gtk_window_set_default_icon_name("com.riccardo.AiUsage");
 
   app_ui_t *ui = g_new0(app_ui_t, 1);
-  ui->selected_days = 7;
-  ui->selected_mask = AI_PROVIDER_ALL;
+  ui->selected_days = cfg.days;
+  ui->selected_mask = cfg.mask;
 
   ui->win = ADW_APPLICATION_WINDOW(adw_application_window_new(GTK_APPLICATION(app)));
   gtk_window_set_title(GTK_WINDOW(ui->win), "AI Usage");
@@ -1369,7 +1302,7 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
   gtk_widget_set_tooltip_text(days_box, "Usage period");
   gtk_box_append(GTK_BOX(filters), days_box);
 
-  const char *prov_items[6] = {"All providers", "Claude", "Codex", "Antigravity", "OpenCode", NULL};
+  const char *prov_items[4] = {"All providers", "Claude", "Codex", NULL};
   GtkWidget *dropdown = gtk_drop_down_new_from_strings(prov_items);
   gtk_drop_down_set_selected(GTK_DROP_DOWN(dropdown), 0);
   g_signal_connect(dropdown, "notify::selected", G_CALLBACK(on_provider_changed), ui);
@@ -1421,6 +1354,11 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
 int main(int argc, char **argv) {
   g_set_prgname("com.riccardo.AiUsage");
   g_set_application_name("AI Usage");
+  char cerr[1100];
+  if (ai_config_load(NULL, &cfg, cerr, sizeof(cerr))) {
+    g_warning("%s; using defaults", cerr);
+    ai_config_load("/nonexistent", &cfg, cerr, sizeof(cerr));
+  }
   AdwApplication *app = adw_application_new("com.riccardo.AiUsage", G_APPLICATION_DEFAULT_FLAGS);
   g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
   int status = g_application_run(G_APPLICATION(app), argc, argv);

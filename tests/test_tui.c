@@ -1,12 +1,10 @@
 #define _XOPEN_SOURCE 700
 #define _DEFAULT_SOURCE
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pty.h>
 #include <signal.h>
-#include <sqlite3.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,10 +22,6 @@ static char output[262144];
 static size_t used;
 static char fixture[256];
 
-typedef int (*sqlite_open_fn)(const char *, sqlite3 **);
-typedef int (*sqlite_exec_fn)(sqlite3 *, const char *, int (*)(void *, int, char **, char **), void *, char **);
-typedef int (*sqlite_close_fn)(sqlite3 *);
-
 static void cleanup(void) {
   if (child > 0) {
     kill(child, SIGKILL);
@@ -36,16 +30,12 @@ static void cleanup(void) {
   if (terminal >= 0) close(terminal);
   if (!fixture[0]) return;
   char path[512];
-  const char *files[] = {
-      "/.claude/projects/demo/session.jsonl", "/.claude/usage-history.jsonl", "/opencode/opencode.db"
-  };
+  const char *files[] = {"/.claude/projects/demo/session.jsonl", "/.claude/usage-history.jsonl"};
   for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
     snprintf(path, sizeof(path), "%s%s", fixture, files[i]);
     unlink(path);
   }
-  const char *dirs[] = {
-      "/.claude/projects/demo", "/.claude/projects", "/.claude", "/.gemini", "/opencode", ""
-  };
+  const char *dirs[] = {"/.claude/projects/demo", "/.claude/projects", "/.claude", ""};
   for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
     snprintf(path, sizeof(path), "%s%s", fixture, dirs[i]);
     rmdir(path);
@@ -56,37 +46,6 @@ static void require(bool ok, const char *message) {
   if (ok) return;
   fprintf(stderr, "TUI test failed: %s\nCaptured output:\n%.*s\n", message, (int)used, output);
   exit(1);
-}
-
-static void create_opencode_fixture(const char *path, time_t now) {
-  void *library = dlopen("libsqlite3.so.0", RTLD_NOW | RTLD_LOCAL);
-  require(library != NULL, "load sqlite3");
-  sqlite_open_fn open_db = (sqlite_open_fn)dlsym(library, "sqlite3_open");
-  sqlite_exec_fn exec_sql = (sqlite_exec_fn)dlsym(library, "sqlite3_exec");
-  sqlite_close_fn close_db = (sqlite_close_fn)dlsym(library, "sqlite3_close");
-  require(open_db && exec_sql && close_db, "resolve sqlite3");
-  sqlite3 *db = NULL;
-  require(open_db(path, &db) == SQLITE_OK, "open opencode fixture");
-  long long created = (long long)now * 1000 - 3600000;
-  char sql[2048];
-  snprintf(
-      sql,
-      sizeof(sql),
-      "CREATE TABLE session_v2(id,title,directory,time_updated);"
-      "CREATE TABLE session_message(id,session_id,type,seq,time_created,time_updated,data);"
-      "INSERT INTO session_v2 VALUES('ses-tui','TUI session','/tmp/tui',%lld);"
-      "INSERT INTO session_message VALUES('msg-tui','ses-tui','assistant',1,%lld,%lld,"
-      "'{\"time\":{\"created\":%lld},\"model\":{\"providerID\":\"opencode-go\",\"id\":\"qwen3.8-flash\"},"
-      "\"tokens\":{\"input\":10,\"output\":20,\"reasoning\":0,"
-      "\"cache\":{\"read\":5,\"write\":0}}}');",
-      created,
-      created,
-      created,
-      created
-  );
-  require(exec_sql(db, sql, NULL, NULL, NULL) == SQLITE_OK, "write opencode fixture");
-  require(close_db(db) == SQLITE_OK, "close opencode fixture");
-  dlclose(library);
 }
 
 static double monotonic_seconds(void) {
@@ -165,7 +124,7 @@ int main(int argc, char **argv) {
   snprintf(fixture, sizeof(fixture), "/tmp/ai-usage-tui-test-XXXXXX");
   require(mkdtemp(fixture) != NULL, "create fixture");
   char path[512];
-  const char *dirs[] = {"/.claude", "/.claude/projects", "/.claude/projects/demo", "/.gemini", "/opencode"};
+  const char *dirs[] = {"/.claude", "/.claude/projects", "/.claude/projects/demo"};
   for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
     snprintf(path, sizeof(path), "%s%s", fixture, dirs[i]);
     require(mkdir(path, 0700) == 0, "create fixture directory");
@@ -201,7 +160,6 @@ int main(int argc, char **argv) {
   launch(argv[1], NULL);
   expect("claude");
   expect("25.0%");
-  expect("Local rolling usage");
   key("2");
   expect("tui-test-model");
   key("3");
@@ -218,7 +176,6 @@ int main(int argc, char **argv) {
   key("d");
   expect("30");
   key("r");
-  expect("Refreshing...");
   key("2");
   expect("tui-test-model");
   key("1");
@@ -235,7 +192,7 @@ int main(int argc, char **argv) {
   expect("codex");
   key("2");
   expect("No usage");
-  key("ppp");
+  key("p");
   expect("tui-test-model");
   expect("150");
   finish(0);
@@ -244,17 +201,6 @@ int main(int argc, char **argv) {
   expect("codex");
   key("2");
   expect("No ");
-  finish(SIGTERM);
-
-  snprintf(path, sizeof(path), "%s/opencode/opencode.db", fixture);
-  create_opencode_fixture(path, now);
-  launch(argv[1], "opencode");
-  expect("opencode");
-  expect("Quota / rate limits");
-  expect("5h");
-  expect("est. from");
-  key("2");
-  expect("opencode-go/qwen3.8-flash");
   finish(SIGTERM);
 
   puts("TUI pseudo-terminal tests passed.");

@@ -12,9 +12,7 @@ extern "C" {
 enum {
   AI_PROVIDER_CLAUDE = 1 << 0,
   AI_PROVIDER_CODEX = 1 << 1,
-  AI_PROVIDER_ANTIGRAVITY = 1 << 2,
-  AI_PROVIDER_OPENCODE = 1 << 3,
-  AI_PROVIDER_ALL = AI_PROVIDER_CLAUDE | AI_PROVIDER_CODEX | AI_PROVIDER_ANTIGRAVITY | AI_PROVIDER_OPENCODE
+  AI_PROVIDER_ALL = AI_PROVIDER_CLAUDE | AI_PROVIDER_CODEX
 };
 
 typedef struct {
@@ -39,11 +37,6 @@ typedef struct {
   int64_t window_tokens;
   int64_t window_turns;
 } ai_quota_window_t;
-
-typedef struct {
-  char group[128];
-  ai_quota_window_t window;
-} ai_grouped_quota_t;
 
 typedef struct {
   char provider[16];
@@ -82,7 +75,7 @@ typedef struct {
 typedef struct {
   double generated_at;
   int days;
-  ai_provider_usage_t providers[4];
+  ai_provider_usage_t providers[2];
   int n_providers;
 } ai_usage_report_t;
 
@@ -92,7 +85,6 @@ void ai_token_stats_add(ai_token_stats_t *dst, const ai_token_stats_t *src);
 bool ai_quota_elapsed_pct(const ai_quota_window_t *qw, double now, double *out_pct);
 bool ai_quota_projected_pct(const ai_quota_window_t *qw, double now, double *out_pct);
 bool ai_quota_projected_tokens(const ai_quota_window_t *qw, double now, int64_t *out_tokens);
-size_t ai_antigravity_parse_quotas(const char *json, ai_grouped_quota_t **out);
 
 void ai_fmt_tokens(int64_t n, char *buf, size_t cap);
 void ai_fmt_duration(double seconds, char *buf, size_t cap);
@@ -103,9 +95,7 @@ void ai_usage_collect(
     int provider_mask,
     double now_override,
     const char *claude_dir,
-    const char *codex_dir,
-    const char *gemini_dir,
-    const char *opencode_dir
+    const char *codex_dir
 );
 
 void ai_usage_report_free(ai_usage_report_t *r);
@@ -113,13 +103,7 @@ void ai_usage_report_free(ai_usage_report_t *r);
 char *ai_usage_report_to_json(const ai_usage_report_t *r);
 
 char *ai_usage_collect_json(
-    int days,
-    int provider_mask,
-    double now_override,
-    const char *claude_dir,
-    const char *codex_dir,
-    const char *gemini_dir,
-    const char *opencode_dir
+    int days, int provider_mask, double now_override, const char *claude_dir, const char *codex_dir
 );
 
 void ai_usage_free_string(char *s);

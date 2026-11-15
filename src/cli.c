@@ -1,3 +1,4 @@
+#include "ai_usage/config.h"
 #include "ai_usage/core.h"
 
 #include <math.h>
@@ -255,7 +256,8 @@ static void render_report(
 }
 
 int main(int argc, char **argv) {
-  int days = 7;
+  int days = -1;
+  const char *config_path = NULL;
   bool all = false;
   bool show_models = false;
   bool show_daily = false;
@@ -276,25 +278,30 @@ int main(int argc, char **argv) {
       show_sessions = true;
     } else if (strcmp(argv[i], "--json") == 0) {
       emit_json = true;
+    } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+      config_path = argv[++i];
     } else if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
       const char *p = argv[++i];
       if (strcmp(p, "claude") == 0) mask |= AI_PROVIDER_CLAUDE;
       else if (strcmp(p, "codex") == 0) mask |= AI_PROVIDER_CODEX;
-      else if (strcmp(p, "antigravity") == 0) mask |= AI_PROVIDER_ANTIGRAVITY;
-      else if (strcmp(p, "opencode") == 0) mask |= AI_PROVIDER_OPENCODE;
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-      printf(
-          "Usage: ai-usage [--days N] [--all] [--provider claude|codex|antigravity|opencode] "
-          "[--models] [--daily] [--sessions] [--json]\n"
-      );
+      printf("Usage: ai-usage [--days N] [--all] [--provider claude|codex] [--config PATH] "
+             "[--models] [--daily] [--sessions] [--json]\n");
       return 0;
     }
   }
-  if (mask == 0) mask = AI_PROVIDER_ALL;
+  ai_config_t cfg;
+  char cerr[1100];
+  if (ai_config_load(config_path, &cfg, cerr, sizeof(cerr))) {
+    fprintf(stderr, "%s\n", cerr);
+    return 1;
+  }
+  if (mask == 0) mask = cfg.mask;
+  if (days < 0) days = cfg.days;
   int eff_days = (all || days <= 0) ? 0 : days;
 
   ai_usage_report_t rep;
-  ai_usage_collect(&rep, eff_days, mask, 0.0, NULL, NULL, NULL, NULL);
+  ai_usage_collect(&rep, eff_days, mask, 0.0, cfg.claude_dir, cfg.codex_dir);
   if (emit_json) {
     char *j = ai_usage_report_to_json(&rep);
     if (j) {

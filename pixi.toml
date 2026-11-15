@@ -1,7 +1,7 @@
 [project]
 name = "ai-usage"
 version = "0.2.1"
-description = "Unified C + GTK4/Libadwaita usage tracker for Claude Code, Codex, and Antigravity"
+description = "Unified C + GTK4/Libadwaita usage tracker for Claude Code and Codex"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
 

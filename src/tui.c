@@ -2,6 +2,7 @@
 #define _XOPEN_SOURCE 700
 #endif
 #define _POSIX_C_SOURCE 200809L
+#include "ai_usage/config.h"
 #include "ai_usage/core.h"
 
 #include <curses.h>
@@ -34,7 +35,9 @@ typedef struct {
 } canvas_t;
 
 static volatile sig_atomic_t interrupted;
-static const char *providers[] = {"all", "claude", "codex", "antigravity", "opencode"};
+static ai_config_t cfg;
+static int collect_mask;
+static const char *providers[] = {"all", "claude", "codex"};
 #define N_PROVIDERS ((int)(sizeof(providers) / sizeof(providers[0])))
 static const char *views[] = {"Overview", "Models", "Daily", "Sessions"};
 
@@ -54,7 +57,7 @@ static void *collect_worker(void *arg) {
     c->busy = true;
     pthread_mutex_unlock(&c->mutex);
     ai_usage_report_t result;
-    ai_usage_collect(&result, days, AI_PROVIDER_ALL, 0.0, NULL, NULL, NULL, NULL);
+    ai_usage_collect(&result, days, collect_mask, 0.0, cfg.claude_dir, cfg.codex_dir);
     pthread_mutex_lock(&c->mutex);
     if (c->ready) ai_usage_report_free(&c->result);
     c->result = result;
@@ -73,7 +76,7 @@ static void request_collect(collector_t *c, int days) {
   pthread_mutex_unlock(&c->mutex);
 }
 
-enum { MUTED = 1, CLAUDE, CODEX, ANTIGRAVITY, WARNING, DANGER, HEADING, TRACK, TAB, OPENCODE };
+enum { MUTED = 1, CLAUDE, CODEX, WARNING = 5, DANGER, HEADING, TRACK, TAB };
 static bool unicode_ui, color_ui;
 static short saved_palette[10][3];
 static bool palette_changed[10];
@@ -126,7 +129,6 @@ static void init_theme(void) {
   }
   for (int i = 0; i < 8; ++i) init_pair((short)(i + 1), colors[i], (short)background);
   init_pair(TAB, colors[2], colors[8]);
-  init_pair(OPENCODE, colors[9], (short)background);
 }
 
 static void restore_theme(void) {
@@ -136,10 +138,7 @@ static void restore_theme(void) {
 }
 
 static int provider_color(const char *name) {
-  if (!strcmp(name, "claude")) return CLAUDE;
-  if (!strcmp(name, "codex")) return CODEX;
-  if (!strcmp(name, "opencode")) return OPENCODE;
-  return ANTIGRAVITY;
+  return !strcmp(name, "claude") ? CLAUDE : CODEX;
 }
 
 static void style(int color, int attributes) {
@@ -290,8 +289,7 @@ static void quota_card(
   ai_fmt_tokens(ai_token_stats_total(&p->totals), tokens, sizeof(tokens));
   style(HEADING, A_BOLD);
   card_text(c, row + 2, x, width, "%s tokens  /  %d sessions", tokens, p->sessions_count);
-  bool local = (!strcmp(p->provider, "antigravity") && !strncmp(p->quota_note, "rolling window", 14)) ||
-               (p->n_quotas > 0 && p->quotas[0].is_token_window);
+  bool local = p->n_quotas > 0 && p->quotas[0].is_token_window;
   style(MUTED, A_NORMAL);
   card_text(
       c,
@@ -494,7 +492,7 @@ static bool number(const char *text, int minimum, int *out) {
 static void usage(FILE *out) {
   fprintf(
       out,
-      "Usage: ai-usage-tui [--days N | --all] [--provider all|claude|codex|antigravity|opencode]\n"
+      "Usage: ai-usage-tui [--days N | --all] [--provider all|claude|codex] [--config PATH]\n"
       "                    [--refresh SECONDS] [--help]\n"
       "Defaults: 7 days, all providers, refresh every 60 seconds (0 disables).\n"
       "Keys: 1-4/Tab views, j/k/arrows scroll, PgUp/PgDn/Home/End,\n"
@@ -503,7 +501,8 @@ static void usage(FILE *out) {
 }
 
 int main(int argc, char **argv) {
-  int days = 7, provider = 0, refresh_seconds = 60;
+  int days = -1, provider = 0, refresh_seconds = 60;
+  const char *config_path = NULL;
   for (int i = 1; i < argc; ++i) {
     const char *arg = argv[i];
     if (!strcmp(arg, "--help") || !strcmp(arg, "-h")) {
@@ -512,6 +511,10 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(arg, "--all")) {
       days = 0;
+      continue;
+    }
+    if (!strcmp(arg, "--config") && i + 1 < argc) {
+      config_path = argv[++i];
       continue;
     }
     if ((!strcmp(arg, "--days") || !strcmp(arg, "--refresh") || !strcmp(arg, "--provider")) && i + 1 < argc) {
@@ -533,6 +536,13 @@ int main(int argc, char **argv) {
     usage(stderr);
     return 2;
   }
+  char cerr[1100];
+  if (ai_config_load(config_path, &cfg, cerr, sizeof(cerr))) {
+    fprintf(stderr, "%s\n", cerr);
+    return 1;
+  }
+  if (days < 0) days = cfg.days;
+  collect_mask = cfg.mask | (provider == 1 ? AI_PROVIDER_CLAUDE : provider == 2 ? AI_PROVIDER_CODEX : 0);
   if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
     fprintf(
         stderr,
