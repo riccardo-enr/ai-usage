@@ -655,6 +655,12 @@ int main(int argc, char **argv) {
           count < offset + canvas.height ? count : offset + canvas.height,
           count
       );
+      const char *tag = "AI Usage v" AI_USAGE_VERSION;
+      int gap = width - 1 - (int)strlen(text) - (int)strlen(tag);
+      if (gap >= 2) {
+        size_t used = strlen(text);
+        snprintf(text + used, sizeof(text) - used, "%*s%s", gap, "", tag);
+      }
       style(MUTED, A_DIM);
       safe_print(height - 1, width, text);
       style(MUTED, A_NORMAL);

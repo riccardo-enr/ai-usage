@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ai_usage VERSION 0.2.1 LANGUAGES C)
+project(ai_usage VERSION 0.3.2 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -23,6 +23,7 @@ add_executable(ai-usage src/cli.c)
 target_link_libraries(ai-usage PRIVATE ai_usage_core)
 
 add_executable(ai-usage-tui src/tui.c)
+target_compile_definitions(ai-usage-tui PRIVATE AI_USAGE_VERSION="${PROJECT_VERSION}")
 target_link_libraries(ai-usage-tui PRIVATE ai_usage_core PkgConfig::NCURSESW Threads::Threads)
 
 add_executable(ai-usage-gtk src/gtk.c)
